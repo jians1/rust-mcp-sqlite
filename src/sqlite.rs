@@ -46,6 +46,15 @@ struct ExecuteFailure {
     statement_index: usize,
 }
 
+impl ExecuteFailure {
+    fn new(message: impl Into<String>, statement_index: usize) -> Self {
+        Self {
+            message: message.into(),
+            statement_index,
+        }
+    }
+}
+
 impl SqliteExecutor {
     pub fn open(config: ExecutorConfig) -> Result<Self, AppError> {
         let flags = match config.mode {
@@ -104,24 +113,48 @@ fn execute_on_connection(
     sql: &str,
     _max_rows: usize,
 ) -> Result<Vec<StatementResult>, ExecuteFailure> {
+    if sql.trim().is_empty() {
+        return Err(ExecuteFailure::new("sql must not be empty", 0));
+    }
+
+    conn.execute_batch("BEGIN")
+        .map_err(|error| ExecuteFailure::new(error.to_string(), 0))?;
+
+    let result = execute_batch_statements(conn, sql);
+
+    match result {
+        Ok(results) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(ExecuteFailure::new(error.to_string(), results.len()))
+            } else {
+                Ok(results)
+            }
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn execute_batch_statements(
+    conn: &Connection,
+    sql: &str,
+) -> Result<Vec<StatementResult>, ExecuteFailure> {
     let mut batch = Batch::new(conn, sql);
     let mut results = Vec::new();
     let mut statement_index = 0;
 
     loop {
-        let statement = batch.next().map_err(|error| ExecuteFailure {
-            message: error.to_string(),
-            statement_index,
-        })?;
+        let statement = batch
+            .next()
+            .map_err(|error| ExecuteFailure::new(error.to_string(), statement_index))?;
         let Some(mut statement) = statement else {
             break;
         };
 
-        let result = execute_statement(conn, &mut statement, statement_index)
-            .map_err(|error| ExecuteFailure {
-                message: error.to_string(),
-                statement_index,
-            })?;
+        let result = execute_statement(conn, &mut statement, statement_index)?;
         results.push(result);
         statement_index += 1;
     }
@@ -133,14 +166,23 @@ fn execute_statement(
     conn: &Connection,
     statement: &mut Statement<'_>,
     statement_index: usize,
-) -> rusqlite::Result<StatementResult> {
+) -> Result<StatementResult, ExecuteFailure> {
     let sql = statement.expanded_sql().unwrap_or_default();
     let kind = classify(&sql);
 
+    if kind.is_transaction_control() {
+        return Err(ExecuteFailure::new(
+            "transaction control statements are not allowed",
+            statement_index,
+        ));
+    }
+
     if statement.column_count() > 0 {
         collect_query_result(statement, kind, statement_index)
+            .map_err(|error| ExecuteFailure::new(error.to_string(), statement_index))
     } else {
         execute_non_query(conn, statement, kind, statement_index)
+            .map_err(|error| ExecuteFailure::new(error.to_string(), statement_index))
     }
 }
 

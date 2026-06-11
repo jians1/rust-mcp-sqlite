@@ -81,3 +81,71 @@ async fn schema_and_insert_and_update_have_expected_shapes() {
     assert_eq!(update.statement_type, "UPDATE");
     assert_eq!(update.affected_rows, 1);
 }
+
+#[tokio::test]
+async fn transaction_rolls_back_all_statements_on_error() {
+    let (_dir, path) = temp_db_path("rollback.db");
+    let exec = executor(path, RunMode::Readwrite, 500).await;
+
+    let create = exec
+        .execute("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT UNIQUE);".to_string())
+        .await;
+    assert!(create.success, "{create:?}");
+
+    let failed = exec
+        .execute(
+            "INSERT INTO users(name) VALUES ('foo');
+             INSERT INTO users(name) VALUES ('foo');"
+                .to_string(),
+        )
+        .await;
+    assert!(!failed.success);
+    assert_eq!(failed.results.len(), 0);
+    assert_eq!(failed.error.as_ref().unwrap().statement_index, 1);
+
+    let check = exec.execute("SELECT COUNT(*) AS c FROM users;".to_string()).await;
+    let StatementResult::Query(result) = &check.results[0] else {
+        panic!("expected query result");
+    };
+    assert_eq!(result.rows[0]["c"], json!(0));
+}
+
+#[tokio::test]
+async fn multiple_selects_return_multiple_results() {
+    let (_dir, path) = temp_db_path("multi_select.db");
+    let exec = executor(path, RunMode::Readwrite, 500).await;
+
+    let response = exec.execute("SELECT 1 AS a; SELECT 2 AS b;".to_string()).await;
+
+    assert!(response.success, "{response:?}");
+    assert_eq!(response.results.len(), 2);
+    let StatementResult::Query(first) = &response.results[0] else {
+        panic!("expected query result");
+    };
+    let StatementResult::Query(second) = &response.results[1] else {
+        panic!("expected query result");
+    };
+    assert_eq!(first.rows[0]["a"], json!(1));
+    assert_eq!(second.rows[0]["b"], json!(2));
+}
+
+#[tokio::test]
+async fn explicit_transaction_control_is_rejected() {
+    let (_dir, path) = temp_db_path("transaction_control.db");
+    let exec = executor(path, RunMode::Readwrite, 500).await;
+
+    for sql in ["BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT x", "RELEASE x"] {
+        let response = exec.execute(sql.to_string()).await;
+        assert!(!response.success, "{sql} should fail");
+        assert_eq!(response.results.len(), 0);
+        assert!(
+            response
+                .error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("transaction control statements are not allowed"),
+            "{response:?}"
+        );
+    }
+}
