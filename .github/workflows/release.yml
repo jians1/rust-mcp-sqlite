@@ -12,14 +12,6 @@ on:
         required: true
         default: false
         type: boolean
-      architectures:
-        description: "Build architectures"
-        required: true
-        default: "amd64,arm64"
-        type: choice
-        options:
-          - amd64
-          - amd64,arm64
 
 permissions:
   contents: write
@@ -29,45 +21,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  prepare:
-    name: Prepare build matrix
-    runs-on: ubuntu-latest
-
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-
-    steps:
-      - name: Generate matrix
-        id: matrix
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          case "${{ inputs.architectures }}" in
-            "amd64")
-              matrix='{"include":[{"arch":"amd64","target":"x86_64-unknown-linux-musl","asset_suffix":"linux-amd64-musl"}]}'
-              ;;
-            "amd64,arm64")
-              matrix='{"include":[{"arch":"amd64","target":"x86_64-unknown-linux-musl","asset_suffix":"linux-amd64-musl"},{"arch":"arm64","target":"aarch64-unknown-linux-musl","asset_suffix":"linux-arm64-musl"}]}'
-              ;;
-            *)
-              echo "Unsupported architectures: ${{ inputs.architectures }}" >&2
-              exit 1
-              ;;
-          esac
-
-          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
-          echo "Generated matrix:"
-          echo "${matrix}"
-
   build:
-    name: Build ${{ matrix.arch }} musl
+    name: Build ${{ matrix.asset_suffix }}
     runs-on: ubuntu-latest
-    needs: prepare
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            asset_suffix: linux-amd64
+            static: false
+
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            asset_suffix: linux-arm64
+            static: false
+
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            asset_suffix: linux-amd64-musl
+            static: true
+
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            asset_suffix: linux-arm64-musl
+            static: true
 
     steps:
       - name: Checkout
@@ -96,7 +76,7 @@ jobs:
       - name: Build release binary
         run: cargo zigbuild --locked --release --target "${{ matrix.target }}"
 
-      - name: Verify static binary
+      - name: Verify binary
         shell: bash
         run: |
           set -euo pipefail
@@ -106,11 +86,20 @@ jobs:
           file "$binary"
           ldd "$binary" 2>&1 || true
 
-          if file "$binary" | grep -q "statically linked"; then
-            echo "Static binary verified"
+          if [ "${{ matrix.static }}" = "true" ]; then
+            if file "$binary" | grep -q "statically linked"; then
+              echo "Static musl binary verified"
+            else
+              echo "Binary is not fully static" >&2
+              exit 1
+            fi
           else
-            echo "Binary is not fully static" >&2
-            exit 1
+            if file "$binary" | grep -q "dynamically linked"; then
+              echo "Dynamic glibc binary verified"
+            else
+              echo "Expected dynamically linked glibc binary" >&2
+              exit 1
+            fi
           fi
 
       - name: Package binary
@@ -146,7 +135,6 @@ jobs:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs:
-      - prepare
       - build
 
     steps:
