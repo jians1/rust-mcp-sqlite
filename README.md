@@ -29,10 +29,17 @@ Input:
 {"sql": "SELECT 1"}
 ```
 
+Multiple statements should be passed in the same `sql` string:
+
+```json
+{"sql": "CREATE TABLE smoke(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO smoke(name) VALUES ('alpha'); INSERT INTO smoke(name) VALUES ('beta'); SELECT id, name FROM smoke ORDER BY id;"}
+```
+
 The response is a JSON envelope with `success`, `results`, and `elapsed_ms`.
+Each successful statement produces one entry in `results`.
 
 ## Modes
 
 `readonly` opens SQLite read-only and rejects mutating statements.
 
-`readwrite` allows legal SQLite SQL except explicit transaction control statements. Each tool call is wrapped in one transaction.
+`readwrite` allows legal SQLite SQL except explicit transaction control statements. Each tool call is wrapped in one transaction, so multiple statements in one `execute_sql` call are atomic: if any statement fails, the whole call rolls back. Do not include explicit transaction control statements such as `BEGIN`, `COMMIT`, or `ROLLBACK`.
