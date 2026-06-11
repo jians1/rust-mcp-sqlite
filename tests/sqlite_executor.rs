@@ -149,3 +149,120 @@ async fn explicit_transaction_control_is_rejected() {
         );
     }
 }
+
+#[tokio::test]
+async fn max_rows_truncates_query_results() {
+    let (_dir, path) = temp_db_path("max_rows.db");
+    let exec = executor(path, RunMode::Readwrite, 2).await;
+
+    let response = exec
+        .execute(
+            "CREATE TABLE nums(n INTEGER);
+             INSERT INTO nums(n) VALUES (1), (2), (3);
+             SELECT n FROM nums ORDER BY n;"
+                .to_string(),
+        )
+        .await;
+
+    assert!(response.success, "{response:?}");
+    let StatementResult::Query(query) = &response.results[2] else {
+        panic!("expected query result");
+    };
+    assert_eq!(query.row_count, 2);
+    assert!(query.truncated);
+    assert_eq!(query.rows[0]["n"], json!(1));
+    assert_eq!(query.rows[1]["n"], json!(2));
+}
+
+#[tokio::test]
+async fn readonly_allows_reads_and_rejects_writes() {
+    let (_dir, path) = temp_db_path("readonly.db");
+    {
+        let setup = executor(path.clone(), RunMode::Readwrite, 500).await;
+        let response = setup
+            .execute("CREATE TABLE users(id INTEGER); INSERT INTO users VALUES (1);".to_string())
+            .await;
+        assert!(response.success, "{response:?}");
+    }
+
+    let readonly = executor(path, RunMode::Readonly, 500).await;
+    let read = readonly.execute("SELECT id FROM users;".to_string()).await;
+    assert!(read.success, "{read:?}");
+
+    let write = readonly.execute("INSERT INTO users VALUES (2);".to_string()).await;
+    assert!(!write.success);
+    assert!(
+        write
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("readonly mode forbids")
+    );
+}
+
+#[tokio::test]
+async fn timeout_interrupts_and_rolls_back() {
+    let (_dir, path) = temp_db_path("timeout.db");
+    let exec = SqliteExecutor::open(ExecutorConfig {
+        db_path: path,
+        mode: RunMode::Readwrite,
+        max_rows: 500,
+        timeout_ms: 1,
+    })
+    .unwrap();
+
+    let response = exec
+        .execute(
+            "CREATE TABLE t(n INTEGER);
+             INSERT INTO t(n) VALUES (1);
+             WITH RECURSIVE cnt(x) AS (
+               SELECT 1
+               UNION ALL
+               SELECT x + 1 FROM cnt WHERE x < 100000000
+             )
+             SELECT sum(x) FROM cnt;"
+                .to_string(),
+        )
+        .await;
+
+    assert!(!response.success, "{response:?}");
+    assert!(
+        response
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("query timed out")
+    );
+
+    let check = exec
+        .execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 't';".to_string())
+        .await;
+    let StatementResult::Query(query) = &check.results[0] else {
+        panic!("expected query result");
+    };
+    assert_eq!(query.row_count, 0);
+}
+
+#[tokio::test]
+async fn fts5_is_available() {
+    let (_dir, path) = temp_db_path("fts5.db");
+    let exec = executor(path, RunMode::Readwrite, 500).await;
+
+    let response = exec
+        .execute(
+            "CREATE VIRTUAL TABLE docs USING fts5(body);
+             INSERT INTO docs(body) VALUES ('hello sqlite');
+             SELECT rowid, body FROM docs WHERE docs MATCH 'sqlite';"
+                .to_string(),
+        )
+        .await;
+
+    assert!(response.success, "{response:?}");
+    let StatementResult::Query(query) = &response.results[2] else {
+        panic!("expected query result");
+    };
+    assert_eq!(query.row_count, 1);
+    assert_eq!(query.rows[0]["body"], json!("hello sqlite"));
+}
