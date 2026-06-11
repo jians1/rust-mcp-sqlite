@@ -2,9 +2,10 @@ use std::net::SocketAddr;
 
 use axum::{Router, middleware::from_fn_with_state};
 use rmcp::{
-    ServerHandler, schemars, tool, tool_handler, tool_router,
+    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
+    schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
@@ -70,10 +71,7 @@ impl ServerHandler for SqliteMcpServer {
     }
 }
 
-pub fn router(
-    executor: SqliteExecutor,
-    auth_token: Option<String>,
-) -> Result<Router, AppError> {
+pub fn router(executor: SqliteExecutor, auth_token: Option<String>) -> Result<Router, AppError> {
     router_with_cancellation(executor, auth_token, CancellationToken::new())
 }
 

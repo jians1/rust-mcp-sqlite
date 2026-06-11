@@ -16,7 +16,10 @@ fn classifies_after_whitespace_and_comments() {
 fn rejects_transaction_control() {
     for sql in ["BEGIN", "commit", "ROLLBACK", "savepoint x", "release x"] {
         let kind = classify(sql);
-        assert!(kind.is_transaction_control(), "{sql} should be transaction control");
+        assert!(
+            kind.is_transaction_control(),
+            "{sql} should be transaction control"
+        );
     }
 }
 

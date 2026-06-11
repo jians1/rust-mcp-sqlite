@@ -103,7 +103,9 @@ async fn transaction_rolls_back_all_statements_on_error() {
     assert_eq!(failed.results.len(), 0);
     assert_eq!(failed.error.as_ref().unwrap().statement_index, 1);
 
-    let check = exec.execute("SELECT COUNT(*) AS c FROM users;".to_string()).await;
+    let check = exec
+        .execute("SELECT COUNT(*) AS c FROM users;".to_string())
+        .await;
     let StatementResult::Query(result) = &check.results[0] else {
         panic!("expected query result");
     };
@@ -115,7 +117,9 @@ async fn multiple_selects_return_multiple_results() {
     let (_dir, path) = temp_db_path("multi_select.db");
     let exec = executor(path, RunMode::Readwrite, 500).await;
 
-    let response = exec.execute("SELECT 1 AS a; SELECT 2 AS b;".to_string()).await;
+    let response = exec
+        .execute("SELECT 1 AS a; SELECT 2 AS b;".to_string())
+        .await;
 
     assert!(response.success, "{response:?}");
     assert_eq!(response.results.len(), 2);
@@ -189,7 +193,9 @@ async fn readonly_allows_reads_and_rejects_writes() {
     let read = readonly.execute("SELECT id FROM users;".to_string()).await;
     assert!(read.success, "{read:?}");
 
-    let write = readonly.execute("INSERT INTO users VALUES (2);".to_string()).await;
+    let write = readonly
+        .execute("INSERT INTO users VALUES (2);".to_string())
+        .await;
     assert!(!write.success);
     assert!(
         write

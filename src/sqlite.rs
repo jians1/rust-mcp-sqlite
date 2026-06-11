@@ -6,10 +6,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fallible_iterator::FallibleIterator;
-use rusqlite::{
-    Batch, Connection, OpenFlags, Row, Statement, ffi::ErrorCode,
-    types::ValueRef,
-};
+use rusqlite::{Batch, Connection, OpenFlags, Row, Statement, ffi::ErrorCode, types::ValueRef};
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
@@ -86,7 +83,11 @@ impl SqliteExecutor {
         }
 
         response.await.unwrap_or_else(|_| {
-            failure_response("sqlite worker stopped before returning a response", 0, start.elapsed())
+            failure_response(
+                "sqlite worker stopped before returning a response",
+                0,
+                start.elapsed(),
+            )
         })
     }
 }
@@ -109,11 +110,7 @@ fn execute_job(conn: &Connection, config: &ExecutorConfig, sql: String) -> Execu
             results,
             elapsed_ms: start.elapsed().as_millis(),
         },
-        Err(error) => failure_response(
-            error.message,
-            error.statement_index,
-            start.elapsed(),
-        ),
+        Err(error) => failure_response(error.message, error.statement_index, start.elapsed()),
     }
 }
 
@@ -266,11 +263,13 @@ fn execute_non_query(
             affected_rows,
             last_insert_rowid: conn.last_insert_rowid(),
         }),
-        StatementKind::Update | StatementKind::Delete => StatementResult::Affected(AffectedResult {
-            statement_index,
-            statement_type,
-            affected_rows,
-        }),
+        StatementKind::Update | StatementKind::Delete => {
+            StatementResult::Affected(AffectedResult {
+                statement_index,
+                statement_type,
+                affected_rows,
+            })
+        }
         StatementKind::Create | StatementKind::Drop | StatementKind::Alter => {
             StatementResult::Schema(SchemaResult {
                 statement_index,
