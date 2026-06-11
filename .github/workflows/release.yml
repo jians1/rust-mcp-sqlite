@@ -22,18 +22,19 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build ${{ matrix.arch }} musl
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
-            target: x86_64-unknown-linux-gnu
-            asset_suffix: linux-amd64
+            target: x86_64-unknown-linux-musl
+            asset_suffix: linux-amd64-musl
           - arch: arm64
-            target: aarch64-unknown-linux-gnu
-            asset_suffix: linux-arm64
+            target: aarch64-unknown-linux-musl
+            asset_suffix: linux-arm64-musl
 
     steps:
       - name: Checkout
@@ -62,15 +63,37 @@ jobs:
       - name: Build release binary
         run: cargo zigbuild --locked --release --target "${{ matrix.target }}"
 
+      - name: Verify static binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file "target/${{ matrix.target }}/release/${BINARY_NAME}"
+          ldd "target/${{ matrix.target }}/release/${BINARY_NAME}" || true
+
+          if ldd "target/${{ matrix.target }}/release/${BINARY_NAME}" 2>&1 | grep -q "not a dynamic executable"; then
+            echo "Static binary verified"
+          else
+            echo "Binary is not fully static" >&2
+            exit 1
+          fi
+
       - name: Package binary
         shell: bash
         run: |
           set -euo pipefail
+
           package="${BINARY_NAME}-${{ inputs.tag }}-${{ matrix.asset_suffix }}"
           mkdir -p "dist/${package}"
+
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${package}/${BINARY_NAME}"
           chmod +x "dist/${package}/${BINARY_NAME}"
+
           cp README.md "dist/${package}/README.md"
+
+          if [ -f LICENSE ]; then
+            cp LICENSE "dist/${package}/LICENSE"
+          fi
+
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
 
