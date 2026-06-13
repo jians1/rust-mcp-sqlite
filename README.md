@@ -39,6 +39,17 @@ delete_vectors
 drop_vector_collection
 ```
 
+Tool summary:
+
+| Tool | Purpose | Mode |
+| --- | --- | --- |
+| `execute_sql` | Run SQLite SQL against the configured database. | Reads in `readonly`; reads and writes in `readwrite`. |
+| `create_vector_collection` | Create a named sqlite-vec collection. | `readwrite` only. |
+| `upsert_vectors` | Insert or replace client-provided embeddings. | `readwrite` only. |
+| `search_vectors` | Search a collection by cosine distance. | `readonly` and `readwrite`. |
+| `delete_vectors` | Delete vector records by id. | `readwrite` only. |
+| `drop_vector_collection` | Drop a vector collection and registry metadata. | `readwrite` only. |
+
 ## Install
 
 ### From GitHub Releases
@@ -226,6 +237,8 @@ curl -sS \
 JSON
 ```
 
+The response is an MCP `content` item whose `text` field is a JSON string. Parse that text to read the tool result.
+
 With auth enabled, add:
 
 ```bash
@@ -264,6 +277,7 @@ Supported SQL includes:
 - common table expressions with `WITH`
 - statements with `RETURNING`
 - FTS5
+- sqlite-vec functions and `vec0` virtual tables
 
 Do not include explicit transaction control statements:
 
@@ -275,7 +289,7 @@ Do not include explicit transaction control statements:
 
 Each `execute_sql` call is wrapped in one transaction by the server. If any statement in the call fails, the whole call rolls back and `results` is empty.
 
-## Response Format
+## execute_sql Response Format
 
 The MCP tool returns a text content item. The text is a JSON envelope.
 
@@ -338,6 +352,25 @@ Collection names must contain only ASCII letters, digits, and underscores, and m
 - `text`: optional string
 - `metadata`: optional JSON object, stored as `{}` when omitted
 
+Vector tools return the same MCP shape as `execute_sql`: a text content item containing a JSON envelope. Successful vector envelopes include:
+
+- `success`: `true`
+- `collection`: the collection name, when relevant
+- operation-specific fields such as `created`, `upserted_count`, `results`, `requested_count`, `deleted_count`, or `existed`
+- `elapsed_ms`
+
+Failed vector envelopes include:
+
+```json
+{
+  "success": false,
+  "error": {
+    "message": "vector dimension mismatch: expected 1536, got 768"
+  },
+  "elapsed_ms": 0
+}
+```
+
 ### create_vector_collection
 
 ```json
@@ -348,6 +381,20 @@ Collection names must contain only ASCII letters, digits, and underscores, and m
 ```
 
 Creates `vec_docs` and records metadata in `__vector_collections`. Calling it again with the same dimension succeeds with `"created": false`; a different dimension returns an error.
+
+Example success body:
+
+```json
+{
+  "success": true,
+  "collection": "docs",
+  "table_name": "vec_docs",
+  "dimension": 1536,
+  "distance_metric": "cosine",
+  "created": true,
+  "elapsed_ms": 3
+}
+```
 
 ### upsert_vectors
 
@@ -367,6 +414,14 @@ Creates `vec_docs` and records metadata in `__vector_collections`. Calling it ag
 
 Upsert replaces the whole record for the same `id`: vector, text, and metadata. Batches are atomic.
 
+Validation rules:
+
+- `items` may contain one or more records.
+- `id` must be non-empty.
+- `vector` length must match the collection dimension.
+- vector values must be finite JSON numbers.
+- `metadata`, when present, must be a JSON object.
+
 ### search_vectors
 
 ```json
@@ -383,6 +438,24 @@ Results include `id`, `distance`, `text`, and `metadata`. Stored vectors are not
 Filters are optional top-level metadata equality checks. Filter keys must be simple identifiers, and values must be scalar JSON values: string, number, boolean, or null. Nested paths, arrays, objects, ranges, and contains queries are not supported.
 
 Unfiltered search uses sqlite-vec KNN. Filtered search first applies exact JSON metadata filtering, then ranks the filtered rows by cosine distance; filtered search is correct but not KNN-optimized in this version.
+
+Example success body:
+
+```json
+{
+  "success": true,
+  "collection": "docs",
+  "results": [
+    {
+      "id": "doc-1",
+      "distance": 0.0,
+      "text": "chunk text",
+      "metadata": {"source": "manual", "tenant": "a"}
+    }
+  ],
+  "elapsed_ms": 2
+}
+```
 
 ### delete_vectors
 
@@ -415,11 +488,80 @@ The vector tools are convenience wrappers over SQLite state. Advanced users can 
 }
 ```
 
-Vector tables can also be queried directly with sqlite-vec functions:
+Vector tables can also be queried directly with sqlite-vec functions. This works for collections created by the vector tools:
 
 ```json
 {
   "sql": "SELECT id, distance FROM vec_docs WHERE embedding MATCH vec_f32('[0.12,-0.03,0.88]') ORDER BY distance LIMIT 5;"
+}
+```
+
+Advanced users may also create sqlite-vec tables directly through `execute_sql`:
+
+```json
+{
+  "sql": "CREATE VIRTUAL TABLE vec_direct USING vec0(id TEXT PRIMARY KEY, embedding float[2] distance_metric=cosine, +text TEXT, +metadata TEXT); INSERT INTO vec_direct(id, embedding, text, metadata) VALUES ('doc-a', vec_f32('[1.0,0.0]'), 'alpha', '{\"tenant\":\"a\"}'); SELECT id, distance FROM vec_direct WHERE embedding MATCH vec_f32('[1.0,0.0]') ORDER BY distance LIMIT 1;"
+}
+```
+
+Tables created directly this way are not registered in `__vector_collections`, so the vector convenience tools will not manage them unless you also maintain compatible registry metadata.
+
+### Minimal MCP Workflow
+
+For raw JSON-RPC clients, each vector operation is called with `tools/call`. The `arguments` object is the tool input shown above.
+
+Create a collection:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "tools/call",
+  "params": {
+    "name": "create_vector_collection",
+    "arguments": {"collection": "docs", "dimension": 2}
+  }
+}
+```
+
+Upsert and search:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "tools/call",
+  "params": {
+    "name": "upsert_vectors",
+    "arguments": {
+      "collection": "docs",
+      "items": [
+        {
+          "id": "doc-a",
+          "vector": [1.0, 0.0],
+          "text": "alpha",
+          "metadata": {"tenant": "a"}
+        }
+      ]
+    }
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "tools/call",
+  "params": {
+    "name": "search_vectors",
+    "arguments": {
+      "collection": "docs",
+      "vector": [1.0, 0.0],
+      "top_k": 1,
+      "filter": {"tenant": "a"}
+    }
+  }
 }
 ```
 
