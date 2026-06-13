@@ -2,7 +2,7 @@
 
 Rust SQLite MCP server over Streamable HTTP.
 
-Use it when an MCP client needs to inspect or modify one SQLite database file through a single `execute_sql` tool.
+Use it when an MCP client needs to inspect or modify one SQLite database file through SQL and optional vector collection tools.
 
 ## Quick Start
 
@@ -28,10 +28,15 @@ The MCP endpoint is:
 http://127.0.0.1:3000/mcp
 ```
 
-Then configure your MCP client to use Streamable HTTP with that URL. The server exposes one tool:
+Then configure your MCP client to use Streamable HTTP with that URL. The server exposes these tools:
 
 ```text
 execute_sql
+create_vector_collection
+upsert_vectors
+search_vectors
+delete_vectors
+drop_vector_collection
 ```
 
 ## Install
@@ -322,6 +327,102 @@ SQLite value mapping:
 - `TEXT` -> JSON string
 - `BLOB` -> `{"type":"blob","encoding":"base64","data":"..."}`
 
+## Vector Collections
+
+Vector support uses SQLite with `sqlite-vec`. Embeddings are supplied by the client as JSON number arrays; this server does not generate embeddings or call model APIs. Collections use cosine distance and are stored as `vec0` virtual tables named `vec_<collection>`.
+
+Collection names must contain only ASCII letters, digits, and underscores, and must not start with `__`. Each record has:
+
+- `id`: non-empty string
+- `vector`: JSON number array matching the collection dimension
+- `text`: optional string
+- `metadata`: optional JSON object, stored as `{}` when omitted
+
+### create_vector_collection
+
+```json
+{
+  "collection": "docs",
+  "dimension": 1536
+}
+```
+
+Creates `vec_docs` and records metadata in `__vector_collections`. Calling it again with the same dimension succeeds with `"created": false`; a different dimension returns an error.
+
+### upsert_vectors
+
+```json
+{
+  "collection": "docs",
+  "items": [
+    {
+      "id": "doc-1",
+      "vector": [0.12, -0.03, 0.88],
+      "text": "chunk text",
+      "metadata": {"source": "manual", "tenant": "a"}
+    }
+  ]
+}
+```
+
+Upsert replaces the whole record for the same `id`: vector, text, and metadata. Batches are atomic.
+
+### search_vectors
+
+```json
+{
+  "collection": "docs",
+  "vector": [0.12, -0.03, 0.88],
+  "top_k": 5,
+  "filter": {"tenant": "a", "source": "manual"}
+}
+```
+
+Results include `id`, `distance`, `text`, and `metadata`. Stored vectors are not returned by default. `top_k` must be positive and no larger than `--max-rows`.
+
+Filters are optional top-level metadata equality checks. Filter keys must be simple identifiers, and values must be scalar JSON values: string, number, boolean, or null. Nested paths, arrays, objects, ranges, and contains queries are not supported.
+
+Unfiltered search uses sqlite-vec KNN. Filtered search first applies exact JSON metadata filtering, then ranks the filtered rows by cosine distance; filtered search is correct but not KNN-optimized in this version.
+
+### delete_vectors
+
+```json
+{
+  "collection": "docs",
+  "ids": ["doc-1", "doc-2"]
+}
+```
+
+Deletes matching ids and returns `requested_count` and `deleted_count`. Missing ids are not errors.
+
+### drop_vector_collection
+
+```json
+{
+  "collection": "docs"
+}
+```
+
+Drops the collection table and removes its registry row. Dropping a missing collection succeeds with `"existed": false`.
+
+### SQL Inspection
+
+The vector tools are convenience wrappers over SQLite state. Advanced users can inspect the registry and collection tables through `execute_sql`:
+
+```json
+{
+  "sql": "SELECT name, table_name, dimension, distance_metric, created_at FROM __vector_collections; SELECT id, text, metadata FROM vec_docs LIMIT 10;"
+}
+```
+
+Vector tables can also be queried directly with sqlite-vec functions:
+
+```json
+{
+  "sql": "SELECT id, distance FROM vec_docs WHERE embedding MATCH vec_f32('[0.12,-0.03,0.88]') ORDER BY distance LIMIT 5;"
+}
+```
+
 ## Modes And Safety
 
 ### readonly
@@ -335,6 +436,8 @@ SELECT * FROM users LIMIT 10;
 PRAGMA table_info(users);
 ```
 
+`search_vectors` is also allowed in readonly mode.
+
 Rejected examples:
 
 ```sql
@@ -342,6 +445,8 @@ INSERT INTO users(name) VALUES ('alice');
 CREATE TABLE t(id INTEGER);
 PRAGMA user_version = 1;
 ```
+
+`create_vector_collection`, `upsert_vectors`, `delete_vectors`, and `drop_vector_collection` are rejected in readonly mode.
 
 ### readwrite
 

@@ -1639,8 +1639,10 @@ dependencies = [
  "reqwest",
  "rmcp",
  "rusqlite",
+ "schemars",
  "serde",
  "serde_json",
+ "sqlite-vec",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1648,6 +1650,15 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.9-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64e66a852cf0604d89877d7b148dbb3a218ad1ccedc40be629845d167885c30"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

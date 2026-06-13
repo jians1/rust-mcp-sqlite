@@ -5,3 +5,4 @@ pub mod mcp;
 pub mod response;
 pub mod sql_classify;
 pub mod sqlite;
+pub mod vector;

@@ -1,13 +1,19 @@
 use std::{
     path::PathBuf,
+    sync::Once,
     thread,
     time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fallible_iterator::FallibleIterator;
-use rusqlite::{Batch, Connection, OpenFlags, Row, Statement, ffi::ErrorCode, types::ValueRef};
+use rusqlite::{
+    Batch, Connection, OpenFlags, Row, Statement,
+    ffi::{ErrorCode, sqlite3_auto_extension},
+    types::ValueRef,
+};
 use serde_json::{Map, Value, json};
+use sqlite_vec::sqlite3_vec_init;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -18,11 +24,16 @@ use crate::{
         StatementResult, SuccessResult,
     },
     sql_classify::{StatementKind, classify, is_forbidden_in_mode, public_statement_type},
+    vector::{
+        CreateVectorCollectionInput, DeleteVectorsInput, DropVectorCollectionInput,
+        SearchVectorsInput, UpsertVectorsInput, VectorOperation, VectorToolResponse,
+        execute_vector_operation,
+    },
 };
 
 #[derive(Clone)]
 pub struct SqliteExecutor {
-    tx: mpsc::Sender<ExecuteJob>,
+    tx: mpsc::Sender<WorkerJob>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,9 +44,19 @@ pub struct ExecutorConfig {
     pub timeout_ms: u64,
 }
 
+enum WorkerJob {
+    Execute(ExecuteJob),
+    Vector(VectorJob),
+}
+
 struct ExecuteJob {
     sql: String,
     reply: oneshot::Sender<ExecuteSqlResponse>,
+}
+
+struct VectorJob {
+    operation: VectorOperation,
+    reply: oneshot::Sender<VectorToolResponse>,
 }
 
 struct ExecuteFailure {
@@ -58,16 +79,26 @@ impl SqliteExecutor {
             RunMode::Readonly => OpenFlags::SQLITE_OPEN_READ_ONLY,
             RunMode::Readwrite => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         };
+        register_sqlite_vec();
         let conn = Connection::open_with_flags(&config.db_path, flags)?;
         check_fts5(&conn)?;
-        let (tx, mut rx) = mpsc::channel::<ExecuteJob>(32);
+        check_sqlite_vec(&conn)?;
+        let (tx, mut rx) = mpsc::channel::<WorkerJob>(32);
 
         thread::Builder::new()
             .name("sqlite-mcp-rs-worker".to_string())
             .spawn(move || {
                 while let Some(job) = rx.blocking_recv() {
-                    let response = execute_job(&conn, &config, job.sql);
-                    let _ = job.reply.send(response);
+                    match job {
+                        WorkerJob::Execute(job) => {
+                            let response = execute_job(&conn, &config, job.sql);
+                            let _ = job.reply.send(response);
+                        }
+                        WorkerJob::Vector(job) => {
+                            let response = execute_vector_job(&conn, &config, job.operation);
+                            let _ = job.reply.send(response);
+                        }
+                    }
                 }
             })?;
 
@@ -78,7 +109,12 @@ impl SqliteExecutor {
         let start = Instant::now();
         let (reply, response) = oneshot::channel();
 
-        if self.tx.send(ExecuteJob { sql, reply }).await.is_err() {
+        if self
+            .tx
+            .send(WorkerJob::Execute(ExecuteJob { sql, reply }))
+            .await
+            .is_err()
+        {
             return failure_response("sqlite worker is not available", 0, start.elapsed());
         }
 
@@ -87,6 +123,61 @@ impl SqliteExecutor {
                 "sqlite worker stopped before returning a response",
                 0,
                 start.elapsed(),
+            )
+        })
+    }
+
+    pub async fn create_vector_collection(
+        &self,
+        input: CreateVectorCollectionInput,
+    ) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::CreateCollection(input))
+            .await
+    }
+
+    pub async fn upsert_vectors(&self, input: UpsertVectorsInput) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::UpsertVectors(input))
+            .await
+    }
+
+    pub async fn search_vectors(&self, input: SearchVectorsInput) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::SearchVectors(input))
+            .await
+    }
+
+    pub async fn delete_vectors(&self, input: DeleteVectorsInput) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::DeleteVectors(input))
+            .await
+    }
+
+    pub async fn drop_vector_collection(
+        &self,
+        input: DropVectorCollectionInput,
+    ) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::DropCollection(input))
+            .await
+    }
+
+    async fn execute_vector(&self, operation: VectorOperation) -> VectorToolResponse {
+        let start = Instant::now();
+        let (reply, response) = oneshot::channel();
+
+        if self
+            .tx
+            .send(WorkerJob::Vector(VectorJob { operation, reply }))
+            .await
+            .is_err()
+        {
+            return VectorToolResponse::failure(
+                "sqlite worker is not available",
+                start.elapsed().as_millis(),
+            );
+        }
+
+        response.await.unwrap_or_else(|_| {
+            VectorToolResponse::failure(
+                "sqlite worker stopped before returning a response",
+                start.elapsed().as_millis(),
             )
         })
     }
@@ -136,6 +227,55 @@ fn execute_on_connection(
                 Err(sqlite_failure(error, results.len(), config))
             } else {
                 Ok(results)
+            }
+        }
+        Err(error) => {
+            let _ = clear_progress_handler(conn);
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn execute_vector_job(
+    conn: &Connection,
+    config: &ExecutorConfig,
+    operation: VectorOperation,
+) -> VectorToolResponse {
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(config.timeout_ms);
+
+    if let Err(error) = conn.progress_handler(1000, Some(move || Instant::now() >= deadline)) {
+        return VectorToolResponse::failure(error.to_string(), start.elapsed().as_millis());
+    }
+
+    let result = execute_vector_on_connection(conn, config, operation);
+    let _ = clear_progress_handler(conn);
+
+    match result {
+        Ok(data) => VectorToolResponse::success(data, start.elapsed().as_millis()),
+        Err(message) => VectorToolResponse::failure(message, start.elapsed().as_millis()),
+    }
+}
+
+fn execute_vector_on_connection(
+    conn: &Connection,
+    config: &ExecutorConfig,
+    operation: VectorOperation,
+) -> Result<Map<String, Value>, String> {
+    conn.execute_batch("BEGIN")
+        .map_err(|error| error.to_string())?;
+
+    let result = execute_vector_operation(conn, config.mode, config.max_rows, operation);
+
+    match result {
+        Ok(data) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = clear_progress_handler(conn);
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error.to_string())
+            } else {
+                Ok(data)
             }
         }
         Err(error) => {
@@ -316,6 +456,25 @@ fn check_fts5(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(
         "CREATE VIRTUAL TABLE temp.__fts5_check USING fts5(x);
          DROP TABLE temp.__fts5_check;",
+    )
+    .map_err(AppError::from)
+}
+
+fn register_sqlite_vec() {
+    static REGISTER: Once = Once::new();
+
+    REGISTER.call_once(|| unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+    });
+}
+
+fn check_sqlite_vec(conn: &Connection) -> Result<(), AppError> {
+    conn.query_row("SELECT vec_version()", [], |_row| Ok(()))?;
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE temp.__vec_check USING vec0(
+           embedding float[2] distance_metric=cosine
+         );
+         DROP TABLE temp.__vec_check;",
     )
     .map_err(AppError::from)
 }

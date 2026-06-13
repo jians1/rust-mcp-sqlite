@@ -5,7 +5,7 @@ use sqlite_mcp_rs::mcp::spawn_test_server;
 use sqlite_mcp_rs::sqlite::{ExecutorConfig, SqliteExecutor};
 
 #[tokio::test]
-async fn mcp_lists_only_execute_sql_and_calls_it() {
+async fn mcp_lists_execute_sql_and_vector_tools() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("mcp.db");
     let executor = SqliteExecutor::open(ExecutorConfig {
@@ -51,19 +51,119 @@ async fn mcp_lists_only_execute_sql_and_calls_it() {
         .await
         .unwrap();
     let tools_array = tools["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools_array.len(), 1);
-    assert_eq!(tools_array[0]["name"], "execute_sql");
+    let mut tool_names = tools_array
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    tool_names.sort();
+    assert_eq!(
+        tool_names,
+        vec![
+            "create_vector_collection",
+            "delete_vectors",
+            "drop_vector_collection",
+            "execute_sql",
+            "search_vectors",
+            "upsert_vectors",
+        ]
+    );
 
+    let call: Value = call_tool(
+        &client,
+        &server.url(),
+        3,
+        "execute_sql",
+        json!({"sql": "SELECT 42 AS answer"}),
+    )
+    .await;
+    assert_eq!(call["success"], true);
+    assert_eq!(call["results"][0]["rows"][0]["answer"], 42);
+
+    let create = call_tool(
+        &client,
+        &server.url(),
+        4,
+        "create_vector_collection",
+        json!({"collection": "docs", "dimension": 2}),
+    )
+    .await;
+    assert_eq!(create["success"], true);
+    assert_eq!(create["collection"], "docs");
+    assert_eq!(create["created"], true);
+
+    let upsert = call_tool(
+        &client,
+        &server.url(),
+        5,
+        "upsert_vectors",
+        json!({
+            "collection": "docs",
+            "items": [
+                {
+                    "id": "doc-a",
+                    "vector": [1.0, 0.0],
+                    "text": "alpha",
+                    "metadata": {"tenant": "a"}
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(upsert["success"], true);
+    assert_eq!(upsert["upserted_count"], 1);
+
+    let search = call_tool(
+        &client,
+        &server.url(),
+        6,
+        "search_vectors",
+        json!({
+            "collection": "docs",
+            "vector": [1.0, 0.0],
+            "top_k": 1,
+            "filter": {"tenant": "a"}
+        }),
+    )
+    .await;
+    assert_eq!(search["success"], true);
+    assert_eq!(search["results"][0]["id"], "doc-a");
+    assert!(search["results"][0].get("vector").is_none());
+
+    let deleted = call_tool(
+        &client,
+        &server.url(),
+        7,
+        "delete_vectors",
+        json!({"collection": "docs", "ids": ["doc-a", "missing"]}),
+    )
+    .await;
+    assert_eq!(deleted["success"], true);
+    assert_eq!(deleted["requested_count"], 2);
+    assert_eq!(deleted["deleted_count"], 1);
+
+    let dropped = call_tool(
+        &client,
+        &server.url(),
+        8,
+        "drop_vector_collection",
+        json!({"collection": "docs"}),
+    )
+    .await;
+    assert_eq!(dropped["success"], true);
+    assert_eq!(dropped["existed"], true);
+}
+
+async fn call_tool(client: &Client, url: &str, id: u64, name: &str, arguments: Value) -> Value {
     let call: Value = client
-        .post(server.url())
+        .post(url)
         .header("accept", "application/json, text/event-stream")
         .json(&json!({
             "jsonrpc": "2.0",
-            "id": 3,
+            "id": id,
             "method": "tools/call",
             "params": {
-                "name": "execute_sql",
-                "arguments": {"sql": "SELECT 42 AS answer"}
+                "name": name,
+                "arguments": arguments
             }
         }))
         .send()
@@ -74,7 +174,5 @@ async fn mcp_lists_only_execute_sql_and_calls_it() {
         .unwrap();
 
     let text = call["result"]["content"][0]["text"].as_str().unwrap();
-    let envelope: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(envelope["success"], true);
-    assert_eq!(envelope["results"][0]["rows"][0]["answer"], 42);
+    serde_json::from_str(text).unwrap()
 }

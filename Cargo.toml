@@ -13,8 +13,10 @@ fallible-iterator = "0.3"
 http = "1"
 rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks", "modern_sqlite"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlite-vec = "=0.1.9-alpha.1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net"] }
 tokio-util = "0.7"

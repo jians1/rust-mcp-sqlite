@@ -272,3 +272,28 @@ async fn fts5_is_available() {
     assert_eq!(query.row_count, 1);
     assert_eq!(query.rows[0]["body"], json!("hello sqlite"));
 }
+
+#[tokio::test]
+async fn sqlite_vec_is_available() {
+    let (_dir, path) = temp_db_path("sqlite_vec.db");
+    let exec = executor(path, RunMode::Readwrite, 500).await;
+
+    let response = exec
+        .execute(
+            "SELECT vec_version() AS version;
+             CREATE VIRTUAL TABLE vec_items USING vec0(
+               id TEXT PRIMARY KEY,
+               embedding float[2] distance_metric=cosine,
+               +text TEXT,
+               +metadata TEXT
+             );"
+            .to_string(),
+        )
+        .await;
+
+    assert!(response.success, "{response:?}");
+    let StatementResult::Query(query) = &response.results[0] else {
+        panic!("expected query result");
+    };
+    assert!(query.rows[0]["version"].as_str().unwrap().starts_with('v'));
+}
