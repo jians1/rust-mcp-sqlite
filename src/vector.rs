@@ -97,13 +97,13 @@ impl VectorToolResponse {
 pub fn execute_vector_operation(
     conn: &Connection,
     mode: RunMode,
-    max_rows: usize,
+    max_top_k: usize,
     operation: VectorOperation,
 ) -> Result<Map<String, Value>, String> {
     match operation {
         VectorOperation::CreateCollection(input) => create_collection(conn, mode, input),
         VectorOperation::UpsertVectors(input) => upsert_vectors(conn, mode, input),
-        VectorOperation::SearchVectors(input) => search_vectors(conn, max_rows, input),
+        VectorOperation::SearchVectors(input) => search_vectors(conn, max_top_k, input),
         VectorOperation::DeleteVectors(input) => delete_vectors(conn, mode, input),
         VectorOperation::DropCollection(input) => drop_collection(conn, mode, input),
     }
@@ -205,7 +205,7 @@ fn upsert_vectors(
 
 fn search_vectors(
     conn: &Connection,
-    max_rows: usize,
+    max_top_k: usize,
     input: SearchVectorsInput,
 ) -> Result<Map<String, Value>, String> {
     let collection = validate_collection_name(&input.collection)?;
@@ -214,8 +214,8 @@ fn search_vectors(
     if input.top_k == 0 {
         return Err("top_k must be positive".to_string());
     }
-    if input.top_k > max_rows {
-        return Err(format!("top_k must not exceed max_rows ({max_rows})"));
+    if input.top_k > max_top_k {
+        return Err(format!("top_k must not exceed max_top_k ({max_top_k})"));
     }
     let vector_json = vector_to_json(&input.vector, existing.dimension)?;
 

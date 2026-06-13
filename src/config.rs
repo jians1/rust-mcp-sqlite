@@ -23,6 +23,8 @@ pub struct Cli {
     pub auth_token: Option<String>,
     #[arg(long, default_value_t = 500)]
     pub max_rows: usize,
+    #[arg(long, default_value_t = 100)]
+    pub max_top_k: usize,
     #[arg(long, default_value_t = 10_000)]
     pub timeout_ms: u64,
 }
@@ -35,6 +37,7 @@ pub struct RuntimeConfig {
     pub mode: RunMode,
     pub auth_token: Option<String>,
     pub max_rows: usize,
+    pub max_top_k: usize,
     pub timeout_ms: u64,
 }
 
@@ -47,6 +50,7 @@ impl From<Cli> for RuntimeConfig {
             mode: cli.mode,
             auth_token: cli.auth_token,
             max_rows: cli.max_rows,
+            max_top_k: cli.max_top_k,
             timeout_ms: cli.timeout_ms,
         }
     }

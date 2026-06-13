@@ -41,6 +41,7 @@ pub struct ExecutorConfig {
     pub db_path: PathBuf,
     pub mode: RunMode,
     pub max_rows: usize,
+    pub max_top_k: usize,
     pub timeout_ms: u64,
 }
 
@@ -266,7 +267,7 @@ fn execute_vector_on_connection(
     conn.execute_batch("BEGIN")
         .map_err(|error| error.to_string())?;
 
-    let result = execute_vector_operation(conn, config.mode, config.max_rows, operation);
+    let result = execute_vector_operation(conn, config.mode, config.max_top_k, operation);
 
     match result {
         Ok(data) => {

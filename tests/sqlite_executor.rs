@@ -14,6 +14,7 @@ async fn executor(path: std::path::PathBuf, mode: RunMode, max_rows: usize) -> S
         db_path: path,
         mode,
         max_rows,
+        max_top_k: 100,
         timeout_ms: 10_000,
     })
     .unwrap()
@@ -214,6 +215,7 @@ async fn timeout_interrupts_and_rolls_back() {
         db_path: path,
         mode: RunMode::Readwrite,
         max_rows: 500,
+        max_top_k: 100,
         timeout_ms: 1,
     })
     .unwrap();

@@ -12,6 +12,7 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
         db_path,
         mode: RunMode::Readwrite,
         max_rows: 500,
+        max_top_k: 100,
         timeout_ms: 10_000,
     })
     .unwrap();

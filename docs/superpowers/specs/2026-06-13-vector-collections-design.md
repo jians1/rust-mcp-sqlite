@@ -166,7 +166,7 @@ Behavior:
 
 - validates the collection exists;
 - validates the query vector length and values;
-- validates `top_k` is positive and does not exceed the runtime `max_rows`
+- validates `top_k` is positive and does not exceed the runtime `max_top_k`
   setting;
 - accepts an optional JSON object filter;
 - filter keys match top-level metadata fields and must be simple identifiers;

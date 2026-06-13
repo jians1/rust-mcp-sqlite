@@ -1,5 +1,7 @@
 # sqlite-mcp-rs
 
+[English](README.md) | [中文](README_ZH.md)
+
 Rust SQLite MCP server over Streamable HTTP.
 
 Use it when an MCP client needs to inspect or modify one SQLite database file through SQL and optional vector collection tools.

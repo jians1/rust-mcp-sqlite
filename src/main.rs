@@ -19,6 +19,7 @@ async fn main() -> Result<(), AppError> {
         db_path: cli.db.clone(),
         mode: cli.mode,
         max_rows: cli.max_rows,
+        max_top_k: cli.max_top_k,
         timeout_ms: cli.timeout_ms,
     })?;
 
@@ -30,6 +31,7 @@ async fn main() -> Result<(), AppError> {
         mode = ?cli.mode,
         auth_enabled = cli.auth_token.is_some(),
         max_rows = cli.max_rows,
+        max_top_k = cli.max_top_k,
         timeout_ms = cli.timeout_ms,
         "starting sqlite-mcp-rs"
     );

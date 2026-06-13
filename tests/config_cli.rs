@@ -17,6 +17,7 @@ fn cli_defaults_match_spec() {
     assert_eq!(cli.mode, RunMode::Readwrite);
     assert_eq!(cli.auth_token, None);
     assert_eq!(cli.max_rows, 500);
+    assert_eq!(cli.max_top_k, 100);
     assert_eq!(cli.timeout_ms, 10_000);
 }
 
@@ -36,6 +37,8 @@ fn cli_accepts_readonly_and_overrides() {
         "secret-value",
         "--max-rows",
         "25",
+        "--max-top-k",
+        "7",
         "--timeout-ms",
         "1500",
     ]);
@@ -45,6 +48,7 @@ fn cli_accepts_readonly_and_overrides() {
     assert_eq!(cli.mode, RunMode::Readonly);
     assert_eq!(cli.auth_token.as_deref(), Some("secret-value"));
     assert_eq!(cli.max_rows, 25);
+    assert_eq!(cli.max_top_k, 7);
     assert_eq!(cli.timeout_ms, 1500);
 }
 
@@ -66,6 +70,7 @@ fn binary_help_mentions_expected_flags() {
         .stdout(predicates::str::contains("--mode"))
         .stdout(predicates::str::contains("--auth-token"))
         .stdout(predicates::str::contains("--max-rows"))
+        .stdout(predicates::str::contains("--max-top-k"))
         .stdout(predicates::str::contains("--timeout-ms"));
 }
 

@@ -13,11 +13,17 @@ fn temp_db_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
-async fn executor(path: std::path::PathBuf, mode: RunMode, max_rows: usize) -> SqliteExecutor {
+async fn executor(
+    path: std::path::PathBuf,
+    mode: RunMode,
+    max_rows: usize,
+    max_top_k: usize,
+) -> SqliteExecutor {
     SqliteExecutor::open(ExecutorConfig {
         db_path: path,
         mode,
         max_rows,
+        max_top_k,
         timeout_ms: 10_000,
     })
     .unwrap()
@@ -26,7 +32,7 @@ async fn executor(path: std::path::PathBuf, mode: RunMode, max_rows: usize) -> S
 #[tokio::test]
 async fn create_collection_writes_registry() {
     let (_dir, path) = temp_db_path("create_collection.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let created = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -80,7 +86,7 @@ async fn create_collection_writes_registry() {
 #[tokio::test]
 async fn create_collection_is_idempotent_for_same_dimension() {
     let (_dir, path) = temp_db_path("create_collection_idempotent.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let created = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -122,7 +128,7 @@ async fn create_collection_is_idempotent_for_same_dimension() {
 #[tokio::test]
 async fn upsert_vectors_replaces_existing_records() {
     let (_dir, path) = temp_db_path("upsert_vectors.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -182,7 +188,7 @@ async fn upsert_vectors_replaces_existing_records() {
 #[tokio::test]
 async fn upsert_vectors_rolls_back_entire_batch_on_invalid_item() {
     let (_dir, path) = temp_db_path("upsert_vectors_rollback.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -228,7 +234,7 @@ async fn upsert_vectors_rolls_back_entire_batch_on_invalid_item() {
 #[tokio::test]
 async fn search_vectors_returns_top_k_without_vectors() {
     let (_dir, path) = temp_db_path("search_vectors.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -282,7 +288,7 @@ async fn search_vectors_returns_top_k_without_vectors() {
 #[tokio::test]
 async fn validation_rejects_invalid_inputs() {
     let (_dir, path) = temp_db_path("validation.db");
-    let exec = executor(path, RunMode::Readwrite, 2).await;
+    let exec = executor(path, RunMode::Readwrite, 1, 2).await;
 
     let invalid_name = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -386,6 +392,19 @@ async fn validation_rejects_invalid_inputs() {
     assert!(!top_k_zero.success, "{top_k_zero:?}");
     assert!(vector_error_message(&top_k_zero).contains("top_k must be positive"));
 
+    let top_k_exceeds_max_rows_only = exec
+        .search_vectors(SearchVectorsInput {
+            collection: "docs".to_string(),
+            vector: vec![1.0, 0.0],
+            top_k: 2,
+            filter: None,
+        })
+        .await;
+    assert!(
+        top_k_exceeds_max_rows_only.success,
+        "{top_k_exceeds_max_rows_only:?}"
+    );
+
     let top_k_too_large = exec
         .search_vectors(SearchVectorsInput {
             collection: "docs".to_string(),
@@ -395,7 +414,7 @@ async fn validation_rejects_invalid_inputs() {
         })
         .await;
     assert!(!top_k_too_large.success, "{top_k_too_large:?}");
-    assert!(vector_error_message(&top_k_too_large).contains("max_rows"));
+    assert!(vector_error_message(&top_k_too_large).contains("max_top_k"));
 
     let invalid_filter_key = exec
         .search_vectors(SearchVectorsInput {
@@ -437,7 +456,7 @@ async fn validation_rejects_invalid_inputs() {
 #[tokio::test]
 async fn search_vectors_filters_metadata() {
     let (_dir, path) = temp_db_path("search_filter.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -487,7 +506,7 @@ async fn search_vectors_filters_metadata() {
 #[tokio::test]
 async fn delete_vectors_reports_requested_and_deleted_counts() {
     let (_dir, path) = temp_db_path("delete_vectors.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -544,7 +563,7 @@ async fn delete_vectors_reports_requested_and_deleted_counts() {
 #[tokio::test]
 async fn drop_vector_collection_removes_table_and_registry() {
     let (_dir, path) = temp_db_path("drop_collection.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
         .create_vector_collection(CreateVectorCollectionInput {
@@ -589,7 +608,7 @@ async fn drop_vector_collection_removes_table_and_registry() {
 async fn readonly_allows_search_and_rejects_vector_writes() {
     let (_dir, path) = temp_db_path("readonly_vectors.db");
     {
-        let exec = executor(path.clone(), RunMode::Readwrite, 500).await;
+        let exec = executor(path.clone(), RunMode::Readwrite, 500, 100).await;
         let create = exec
             .create_vector_collection(CreateVectorCollectionInput {
                 collection: "docs".to_string(),
@@ -611,7 +630,7 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
         assert!(upsert.success, "{upsert:?}");
     }
 
-    let readonly = executor(path, RunMode::Readonly, 500).await;
+    let readonly = executor(path, RunMode::Readonly, 500, 100).await;
     let search = readonly
         .search_vectors(SearchVectorsInput {
             collection: "docs".to_string(),
@@ -671,12 +690,12 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
 async fn readonly_search_missing_collection_returns_not_found() {
     let (_dir, path) = temp_db_path("readonly_missing_collection.db");
     {
-        let exec = executor(path.clone(), RunMode::Readwrite, 500).await;
+        let exec = executor(path.clone(), RunMode::Readwrite, 500, 100).await;
         let response = exec.execute("SELECT 1;".to_string()).await;
         assert!(response.success, "{response:?}");
     }
 
-    let readonly = executor(path, RunMode::Readonly, 500).await;
+    let readonly = executor(path, RunMode::Readonly, 500, 100).await;
     let search = readonly
         .search_vectors(SearchVectorsInput {
             collection: "docs".to_string(),
@@ -693,7 +712,7 @@ async fn readonly_search_missing_collection_returns_not_found() {
 #[tokio::test]
 async fn execute_sql_can_query_vector_collection_tables() {
     let (_dir, path) = temp_db_path("sql_compat.db");
-    let exec = executor(path, RunMode::Readwrite, 500).await;
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
         .create_vector_collection(CreateVectorCollectionInput {
