@@ -1,6 +1,7 @@
 use clap::Parser;
 use sqlite_mcp_rs::{
     config::{Cli, RuntimeConfig},
+    embedding::EmbeddingClient,
     error::AppError,
     sqlite::{ExecutorConfig, SqliteExecutor},
 };
@@ -41,7 +42,13 @@ async fn main() -> Result<(), AppError> {
         "starting sqlite-mcp-rs"
     );
 
-    let app = sqlite_mcp_rs::mcp::router(executor, runtime.auth_token)?;
+    let embeddings = match EmbeddingClient::from_runtime_config(&runtime.embedding) {
+        Some(Ok(client)) => Some(client),
+        Some(Err(message)) => return Err(AppError::Config(message)),
+        None => None,
+    };
+
+    let app = sqlite_mcp_rs::mcp::router(executor, runtime.auth_token, embeddings)?;
     let addr = std::net::SocketAddr::new(runtime.host, runtime.port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)

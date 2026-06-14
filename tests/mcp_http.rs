@@ -1,8 +1,14 @@
+use axum::{Json, Router, routing::post};
 use reqwest::Client;
 use serde_json::{Value, json};
-use sqlite_mcp_rs::config::RunMode;
+use sqlite_mcp_rs::config::{EmbeddingRuntimeConfig, RunMode};
+use sqlite_mcp_rs::embedding::{EMBEDDINGS_PATH, EmbeddingClient};
 use sqlite_mcp_rs::mcp::spawn_test_server;
 use sqlite_mcp_rs::sqlite::{ExecutorConfig, SqliteExecutor};
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
+
+const TEST_EMBEDDINGS_ROUTE: &str = "/v1/embeddings";
 
 #[tokio::test]
 async fn mcp_lists_execute_sql_and_vector_tools() {
@@ -17,7 +23,10 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
     })
     .unwrap();
 
-    let server = spawn_test_server(executor, None).await.unwrap();
+    let embedding_server = spawn_test_embedding_server().await;
+    let server = spawn_test_server(executor, None, Some(embedding_server.client()))
+        .await
+        .unwrap();
     let client = Client::new();
 
     let initialize: Value = client
@@ -60,12 +69,12 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
     assert_eq!(
         tool_names,
         vec![
-            "create_vector_collection",
-            "delete_vectors",
-            "drop_vector_collection",
+            "create_text_collection",
+            "delete_texts",
+            "drop_text_collection",
             "execute_sql",
-            "search_vectors",
-            "upsert_vectors",
+            "search_text",
+            "upsert_texts",
         ]
     );
 
@@ -84,25 +93,25 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
         &client,
         &server.url(),
         4,
-        "create_vector_collection",
-        json!({"collection": "docs", "dimension": 2}),
+        "create_text_collection",
+        json!({"collection": "docs"}),
     )
     .await;
     assert_eq!(create["success"], true);
     assert_eq!(create["collection"], "docs");
+    assert_eq!(create["dimension"], 2);
     assert_eq!(create["created"], true);
 
     let upsert = call_tool(
         &client,
         &server.url(),
         5,
-        "upsert_vectors",
+        "upsert_texts",
         json!({
             "collection": "docs",
             "items": [
                 {
                     "id": "doc-a",
-                    "vector": [1.0, 0.0],
                     "text": "alpha",
                     "metadata": {"tenant": "a"}
                 }
@@ -117,10 +126,10 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
         &client,
         &server.url(),
         6,
-        "search_vectors",
+        "search_text",
         json!({
             "collection": "docs",
-            "vector": [1.0, 0.0],
+            "query": "alpha query",
             "top_k": 1,
             "filter": {"tenant": "a"}
         }),
@@ -134,7 +143,7 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
         &client,
         &server.url(),
         7,
-        "delete_vectors",
+        "delete_texts",
         json!({"collection": "docs", "ids": ["doc-a", "missing"]}),
     )
     .await;
@@ -146,12 +155,91 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
         &client,
         &server.url(),
         8,
-        "drop_vector_collection",
+        "drop_text_collection",
         json!({"collection": "docs"}),
     )
     .await;
     assert_eq!(dropped["success"], true);
     assert_eq!(dropped["existed"], true);
+
+    assert_eq!(embedding_server.requests.lock().unwrap().len(), 3);
+}
+
+struct TestEmbeddingServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    shutdown: CancellationToken,
+}
+
+impl TestEmbeddingServer {
+    fn client(&self) -> EmbeddingClient {
+        EmbeddingClient::new(EmbeddingRuntimeConfig {
+            base_url: self.base_url.clone(),
+            api_key: None,
+            model: Some("test-embedding".to_string()),
+            dimensions: Some(2),
+            timeout_ms: 5_000,
+        })
+        .unwrap()
+    }
+}
+
+impl Drop for TestEmbeddingServer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+async fn spawn_test_embedding_server() -> TestEmbeddingServer {
+    assert_eq!(format!("/v1{EMBEDDINGS_PATH}"), TEST_EMBEDDINGS_ROUTE);
+
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let shutdown = CancellationToken::new();
+    let app = Router::new().route(
+        TEST_EMBEDDINGS_ROUTE,
+        post({
+            let requests = requests.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    requests.lock().unwrap().push(body.clone());
+                    let input = body["input"].as_array().unwrap();
+                    let data = input
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            let text = value.as_str().unwrap();
+                            let embedding = if text.contains("beta") {
+                                json!([0.0, 1.0])
+                            } else {
+                                json!([1.0, 0.0])
+                            };
+                            json!({"index": index, "embedding": embedding})
+                        })
+                        .collect::<Vec<_>>();
+                    Json(json!({"data": data}))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                server_shutdown.cancelled_owned().await;
+            })
+            .await;
+    });
+
+    TestEmbeddingServer {
+        base_url: format!("http://{addr}/v1"),
+        requests,
+        shutdown,
+    }
 }
 
 async fn call_tool(client: &Client, url: &str, id: u64, name: &str, arguments: Value) -> Value {

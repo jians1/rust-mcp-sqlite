@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Instant};
 
 use axum::{Router, middleware::from_fn_with_state};
 use rmcp::{
@@ -15,11 +15,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     auth::{AuthState, require_auth},
+    config::RunMode,
+    embedding::EmbeddingClient,
     error::AppError,
     sqlite::SqliteExecutor,
     vector::{
-        CreateVectorCollectionInput, DeleteVectorsInput, DropVectorCollectionInput,
-        SearchVectorsInput, UpsertVectorsInput, VectorToolResponse,
+        CreateTextCollectionInput, CreateTextCollectionStorageInput, DeleteTextsInput,
+        DescribeTextCollectionInput, DropTextCollectionInput, GeneratedTextItemInput,
+        SearchGeneratedTextInput, SearchTextInput, TextItemInput, UpsertGeneratedTextsInput,
+        UpsertTextsInput, VectorToolResponse,
     },
 };
 
@@ -31,15 +35,29 @@ struct ExecuteSqlToolInput {
 #[derive(Clone)]
 pub struct SqliteMcpServer {
     executor: SqliteExecutor,
+    embeddings: Option<EmbeddingClient>,
     tool_router: ToolRouter<Self>,
 }
 
 impl SqliteMcpServer {
-    pub fn new(executor: SqliteExecutor) -> Self {
+    pub fn new(executor: SqliteExecutor, embeddings: Option<EmbeddingClient>) -> Self {
         Self {
             executor,
+            embeddings,
             tool_router: Self::tool_router(),
         }
+    }
+}
+
+const EMBEDDING_DIMENSION_PROBE: &str = "sqlite-mcp-rs embedding dimension probe";
+
+impl SqliteMcpServer {
+    async fn embed(&self, input: &[String]) -> Result<Vec<Vec<f64>>, String> {
+        let client = self
+            .embeddings
+            .as_ref()
+            .ok_or_else(|| "embedding is not configured; set --embedding-model".to_string())?;
+        client.embed(input).await
     }
 }
 
@@ -68,59 +86,240 @@ impl SqliteMcpServer {
     }
 
     #[tool(
-        name = "create_vector_collection",
-        description = "Create a sqlite-vec vector collection"
+        name = "create_text_collection",
+        description = "Create a text embedding collection"
     )]
-    async fn create_vector_collection(
+    async fn create_text_collection(
         &self,
-        Parameters(input): Parameters<CreateVectorCollectionInput>,
+        Parameters(input): Parameters<CreateTextCollectionInput>,
     ) -> CallToolResult {
-        vector_result(self.executor.create_vector_collection(input).await)
+        let start = Instant::now();
+        if self.executor.mode() == RunMode::Readonly {
+            return vector_failure(start, "readonly mode forbids create_text_collection");
+        }
+
+        let probe = vec![EMBEDDING_DIMENSION_PROBE.to_string()];
+        let embedding = match self.embed(&probe).await.and_then(first_embedding) {
+            Ok(embedding) => embedding,
+            Err(message) => return vector_failure(start, message),
+        };
+        if let Err(message) = validate_embedding_dimension(&embedding, embedding.len()) {
+            return vector_failure(start, message);
+        }
+
+        let response = self
+            .executor
+            .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
+                collection: input.collection,
+                dimension: embedding.len(),
+            })
+            .await;
+        timed_vector_result(start, response)
     }
 
     #[tool(
-        name = "upsert_vectors",
-        description = "Insert or replace vectors in a collection"
+        name = "upsert_texts",
+        description = "Insert or replace texts in a collection"
     )]
-    async fn upsert_vectors(
-        &self,
-        Parameters(input): Parameters<UpsertVectorsInput>,
-    ) -> CallToolResult {
-        vector_result(self.executor.upsert_vectors(input).await)
+    async fn upsert_texts(&self, Parameters(input): Parameters<UpsertTextsInput>) -> CallToolResult {
+        let start = Instant::now();
+        if self.executor.mode() == RunMode::Readonly {
+            return vector_failure(start, "readonly mode forbids upsert_texts");
+        }
+        if let Err(message) = validate_text_items(&input.items) {
+            return vector_failure(start, message);
+        }
+
+        let description = self
+            .executor
+            .describe_text_collection(DescribeTextCollectionInput {
+                collection: input.collection.clone(),
+            })
+            .await;
+        if !description.success {
+            return timed_vector_result(start, description);
+        }
+        let dimension = match dimension_from_response(&description) {
+            Ok(dimension) => dimension,
+            Err(message) => return vector_failure(start, message),
+        };
+
+        let texts = input
+            .items
+            .iter()
+            .map(|item| item.text.clone())
+            .collect::<Vec<_>>();
+        let embeddings = match self.embed(&texts).await {
+            Ok(embeddings) => embeddings,
+            Err(message) => return vector_failure(start, message),
+        };
+        if embeddings.len() != input.items.len() {
+            return vector_failure(
+                start,
+                format!(
+                    "embedding response count mismatch: expected {}, got {}",
+                    input.items.len(),
+                    embeddings.len()
+                ),
+            );
+        }
+
+        let mut generated_items = Vec::with_capacity(input.items.len());
+        for (item, vector) in input.items.into_iter().zip(embeddings) {
+            if let Err(message) = validate_embedding_dimension(&vector, dimension) {
+                return vector_failure(start, message);
+            }
+            generated_items.push(GeneratedTextItemInput {
+                id: item.id,
+                vector,
+                text: item.text,
+                metadata: item.metadata,
+            });
+        }
+
+        let response = self
+            .executor
+            .upsert_generated_texts(UpsertGeneratedTextsInput {
+                collection: input.collection,
+                items: generated_items,
+            })
+            .await;
+        timed_vector_result(start, response)
     }
 
     #[tool(
-        name = "search_vectors",
-        description = "Search a vector collection with cosine distance"
+        name = "search_text",
+        description = "Search a text embedding collection"
     )]
-    async fn search_vectors(
-        &self,
-        Parameters(input): Parameters<SearchVectorsInput>,
-    ) -> CallToolResult {
-        vector_result(self.executor.search_vectors(input).await)
+    async fn search_text(&self, Parameters(input): Parameters<SearchTextInput>) -> CallToolResult {
+        let start = Instant::now();
+        if input.query.trim().is_empty() {
+            return vector_failure(start, "query must not be empty");
+        }
+
+        let description = self
+            .executor
+            .describe_text_collection(DescribeTextCollectionInput {
+                collection: input.collection.clone(),
+            })
+            .await;
+        if !description.success {
+            return timed_vector_result(start, description);
+        }
+        let dimension = match dimension_from_response(&description) {
+            Ok(dimension) => dimension,
+            Err(message) => return vector_failure(start, message),
+        };
+
+        let embedding = match self.embed(&[input.query]).await.and_then(first_embedding) {
+            Ok(embedding) => embedding,
+            Err(message) => return vector_failure(start, message),
+        };
+        if let Err(message) = validate_embedding_dimension(&embedding, dimension) {
+            return vector_failure(start, message);
+        }
+
+        let response = self
+            .executor
+            .search_generated_text(SearchGeneratedTextInput {
+                collection: input.collection,
+                vector: embedding,
+                top_k: input.top_k,
+                filter: input.filter,
+            })
+            .await;
+        timed_vector_result(start, response)
     }
 
     #[tool(
-        name = "delete_vectors",
-        description = "Delete vectors from a collection by id"
+        name = "delete_texts",
+        description = "Delete texts from a collection by id"
     )]
-    async fn delete_vectors(
-        &self,
-        Parameters(input): Parameters<DeleteVectorsInput>,
-    ) -> CallToolResult {
-        vector_result(self.executor.delete_vectors(input).await)
+    async fn delete_texts(&self, Parameters(input): Parameters<DeleteTextsInput>) -> CallToolResult {
+        vector_result(self.executor.delete_texts(input).await)
     }
 
     #[tool(
-        name = "drop_vector_collection",
-        description = "Drop a vector collection and remove its registry row"
+        name = "drop_text_collection",
+        description = "Drop a text embedding collection and remove its registry row"
     )]
-    async fn drop_vector_collection(
+    async fn drop_text_collection(
         &self,
-        Parameters(input): Parameters<DropVectorCollectionInput>,
+        Parameters(input): Parameters<DropTextCollectionInput>,
     ) -> CallToolResult {
-        vector_result(self.executor.drop_vector_collection(input).await)
+        vector_result(self.executor.drop_text_collection(input).await)
     }
+}
+
+fn timed_vector_result(start: Instant, mut response: VectorToolResponse) -> CallToolResult {
+    response.elapsed_ms = start.elapsed().as_millis();
+    vector_result(response)
+}
+
+fn vector_failure(start: Instant, message: impl Into<String>) -> CallToolResult {
+    vector_result(VectorToolResponse::failure(
+        message,
+        start.elapsed().as_millis(),
+    ))
+}
+
+fn first_embedding(mut embeddings: Vec<Vec<f64>>) -> Result<Vec<f64>, String> {
+    if embeddings.len() != 1 {
+        return Err(format!(
+            "embedding response count mismatch: expected 1, got {}",
+            embeddings.len()
+        ));
+    }
+    Ok(embeddings.remove(0))
+}
+
+fn validate_text_items(items: &[TextItemInput]) -> Result<(), String> {
+    if items.is_empty() {
+        return Err("items must not be empty".to_string());
+    }
+    for item in items {
+        if item.id.is_empty() {
+            return Err("text id must not be empty".to_string());
+        }
+        if item.text.trim().is_empty() {
+            return Err("text must not be empty".to_string());
+        }
+        if let Some(metadata) = &item.metadata
+            && !metadata.is_object()
+        {
+            return Err("metadata must be a JSON object".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn dimension_from_response(response: &VectorToolResponse) -> Result<usize, String> {
+    response
+        .data
+        .get("dimension")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| "collection response did not include a valid dimension".to_string())
+}
+
+fn validate_embedding_dimension(
+    vector: &[f64],
+    expected_dimension: usize,
+) -> Result<(), String> {
+    if expected_dimension == 0 {
+        return Err("embedding dimension must be positive".to_string());
+    }
+    if vector.len() != expected_dimension {
+        return Err(format!(
+            "embedding dimension mismatch: expected {}, got {}",
+            expected_dimension,
+            vector.len()
+        ));
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err("embedding contains a non-finite value".to_string());
+    }
+    Ok(())
 }
 
 fn vector_result(response: VectorToolResponse) -> CallToolResult {
@@ -155,18 +354,23 @@ impl ServerHandler for SqliteMcpServer {
     }
 }
 
-pub fn router(executor: SqliteExecutor, auth_token: Option<String>) -> Result<Router, AppError> {
-    router_with_cancellation(executor, auth_token, CancellationToken::new())
+pub fn router(
+    executor: SqliteExecutor,
+    auth_token: Option<String>,
+    embeddings: Option<EmbeddingClient>,
+) -> Result<Router, AppError> {
+    router_with_cancellation(executor, auth_token, embeddings, CancellationToken::new())
 }
 
 fn router_with_cancellation(
     executor: SqliteExecutor,
     auth_token: Option<String>,
+    embeddings: Option<EmbeddingClient>,
     cancellation_token: CancellationToken,
 ) -> Result<Router, AppError> {
     let service: StreamableHttpService<SqliteMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
-            move || Ok(SqliteMcpServer::new(executor.clone())),
+            move || Ok(SqliteMcpServer::new(executor.clone(), embeddings.clone())),
             Default::default(),
             StreamableHttpServerConfig::default()
                 .with_stateful_mode(false)
@@ -203,9 +407,10 @@ impl Drop for TestServer {
 pub async fn spawn_test_server(
     executor: SqliteExecutor,
     auth_token: Option<String>,
+    embeddings: Option<EmbeddingClient>,
 ) -> Result<TestServer, AppError> {
     let shutdown = CancellationToken::new();
-    let app = router_with_cancellation(executor, auth_token, shutdown.child_token())?;
+    let app = router_with_cancellation(executor, auth_token, embeddings, shutdown.child_token())?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let server_shutdown = shutdown.clone();
