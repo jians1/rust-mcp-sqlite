@@ -3,7 +3,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use reqwest::StatusCode;
@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::config::EmbeddingRuntimeConfig;
 
 pub const EMBEDDINGS_PATH: &str = "/embeddings";
+
+const EMBEDDING_MAX_ATTEMPTS: usize = 3;
+const EMBEDDING_RETRY_BASE_DELAY_MS: u64 = 100;
+const EMBEDDING_RETRY_MAX_DELAY_MS: u64 = 1_000;
 
 #[derive(Clone)]
 pub struct EmbeddingClient {
@@ -68,6 +72,10 @@ impl EmbeddingClient {
         config.model.as_ref().map(|_| Self::new(config.clone()))
     }
 
+    pub fn batch_size(&self) -> usize {
+        self.config.batch_size
+    }
+
     pub async fn embed(&self, input: &[String]) -> Result<Vec<Vec<f64>>, String> {
         if input.is_empty() {
             return Err("embedding input must not be empty".to_string());
@@ -87,14 +95,16 @@ impl EmbeddingClient {
                 .then_some(self.config.dimensions)
                 .flatten(),
         };
-        let (status, text) = self.post_embedding_request(&request).await?;
+        let (status, text) = self.post_embedding_request_with_retry(&request).await?;
         if status == StatusCode::BAD_REQUEST && request.dimensions.is_some() {
             let retry_request = EmbeddingRequest {
                 model,
                 input,
                 dimensions: None,
             };
-            let (retry_status, retry_text) = self.post_embedding_request(&retry_request).await?;
+            let (retry_status, retry_text) = self
+                .post_embedding_request_with_retry(&retry_request)
+                .await?;
             if !retry_status.is_success() {
                 return Err(format_embedding_status_error(retry_status, &retry_text));
             }
@@ -110,7 +120,50 @@ impl EmbeddingClient {
         parse_embedding_response(&text, input.len())
     }
 
-    async fn post_embedding_request(
+    async fn post_embedding_request_with_retry(
+        &self,
+        request: &EmbeddingRequest<'_>,
+    ) -> Result<(StatusCode, String), String> {
+        let mut attempt = 1;
+        loop {
+            let started = Instant::now();
+            let response = self.post_embedding_request_once(request).await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+
+            match response {
+                Ok((status, text)) => {
+                    tracing::info!(
+                        model = %request.model,
+                        input_count = request.input.len(),
+                        attempt,
+                        status = %status,
+                        elapsed_ms,
+                        retryable = should_retry_status(status),
+                        "embedding HTTP request completed"
+                    );
+                    if should_retry_status(status) && attempt < EMBEDDING_MAX_ATTEMPTS {
+                        tokio::time::sleep(retry_delay(attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Ok((status, text));
+                }
+                Err(message) => {
+                    tracing::info!(
+                        model = %request.model,
+                        input_count = request.input.len(),
+                        attempt,
+                        elapsed_ms,
+                        error = %message,
+                        "embedding HTTP request failed"
+                    );
+                    return Err(message);
+                }
+            }
+        }
+    }
+
+    async fn post_embedding_request_once(
         &self,
         request: &EmbeddingRequest<'_>,
     ) -> Result<(StatusCode, String), String> {
@@ -135,6 +188,19 @@ impl EmbeddingClient {
 
         Ok((status, text))
     }
+}
+
+fn should_retry_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    let shift = attempt.saturating_sub(1).min(20) as u32;
+    let multiplier = 1_u64 << shift;
+    let delay_ms = EMBEDDING_RETRY_BASE_DELAY_MS
+        .saturating_mul(multiplier)
+        .min(EMBEDDING_RETRY_MAX_DELAY_MS);
+    Duration::from_millis(delay_ms)
 }
 
 fn parse_embedding_response(text: &str, expected_count: usize) -> Result<Vec<Vec<f64>>, String> {

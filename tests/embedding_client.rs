@@ -285,6 +285,108 @@ async fn embedding_client_reports_non_success_status_with_body_excerpt() {
     shutdown.cancel();
 }
 
+#[tokio::test]
+async fn embedding_client_retries_429_then_succeeds() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let server = spawn_embedding_status_sequence_server(
+        requests.clone(),
+        vec![
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"error": {"message": "rate limited"}}),
+            ),
+            (
+                StatusCode::OK,
+                json!({"data": [{"index": 0, "embedding": [0.1, 0.2]}]}),
+            ),
+        ],
+    )
+    .await;
+
+    let client = EmbeddingClient::new(EmbeddingRuntimeConfig {
+        base_url: server.base_url(),
+        api_key: None,
+        model: Some("model".to_string()),
+        dimensions: None,
+        timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
+    })
+    .unwrap();
+
+    let embeddings = client.embed(&["alpha".to_string()]).await.unwrap();
+
+    assert_eq!(embeddings, vec![vec![0.1, 0.2]]);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn embedding_client_retries_5xx_then_succeeds() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let server = spawn_embedding_status_sequence_server(
+        requests.clone(),
+        vec![
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": {"message": "temporary"}}),
+            ),
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({"error": {"message": "gateway"}}),
+            ),
+            (
+                StatusCode::OK,
+                json!({"data": [{"index": 0, "embedding": [0.3, 0.4]}]}),
+            ),
+        ],
+    )
+    .await;
+
+    let client = EmbeddingClient::new(EmbeddingRuntimeConfig {
+        base_url: server.base_url(),
+        api_key: None,
+        model: Some("model".to_string()),
+        dimensions: None,
+        timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
+    })
+    .unwrap();
+
+    let embeddings = client.embed(&["alpha".to_string()]).await.unwrap();
+
+    assert_eq!(embeddings, vec![vec![0.3, 0.4]]);
+    assert_eq!(requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn embedding_client_does_not_retry_401() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let server = spawn_embedding_status_sequence_server(
+        requests.clone(),
+        vec![(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": {"message": "invalid api key"}}),
+        )],
+    )
+    .await;
+
+    let client = EmbeddingClient::new(EmbeddingRuntimeConfig {
+        base_url: server.base_url(),
+        api_key: Some("secret".to_string()),
+        model: Some("model".to_string()),
+        dimensions: None,
+        timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
+    })
+    .unwrap();
+
+    let err = client.embed(&["alpha".to_string()]).await.unwrap_err();
+
+    assert!(err.contains("401 Unauthorized"), "{err}");
+    assert!(err.contains("invalid api key"), "{err}");
+    assert!(!err.contains("secret"), "{err}");
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
 struct TestEmbeddingServer {
     base_url: String,
     shutdown: CancellationToken,
@@ -317,6 +419,47 @@ async fn spawn_embedding_server(
                 async move {
                     requests.lock().unwrap().push(body);
                     Json(response)
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_shutdown = shutdown.clone();
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                server_shutdown.cancelled_owned().await;
+            })
+            .await;
+    });
+
+    TestEmbeddingServer {
+        base_url: format!("http://{addr}/v1"),
+        shutdown,
+    }
+}
+
+async fn spawn_embedding_status_sequence_server(
+    requests: Arc<Mutex<Vec<Value>>>,
+    responses: Vec<(StatusCode, Value)>,
+) -> TestEmbeddingServer {
+    let shutdown = CancellationToken::new();
+    let responses = Arc::new(Mutex::new(responses));
+    let app = Router::new().route(
+        TEST_EMBEDDINGS_ROUTE,
+        post({
+            let requests = requests.clone();
+            let responses = responses.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                let responses = responses.clone();
+                async move {
+                    requests.lock().unwrap().push(body);
+                    let mut responses = responses.lock().unwrap();
+                    let (status, body) = responses.remove(0);
+                    (status, Json(body)).into_response()
                 }
             }
         }),
