@@ -29,26 +29,7 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
         .unwrap();
     let client = Client::new();
 
-    let initialize: Value = client
-        .post(server.url())
-        .header("accept", "application/json, text/event-stream")
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "test", "version": "0.1.0"}
-            }
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(initialize.get("result").is_some(), "{initialize}");
+    initialize(&client, &server.url()).await;
 
     let tools: Value = client
         .post(server.url())
@@ -165,6 +146,155 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
     assert_eq!(embedding_server.requests.lock().unwrap().len(), 3);
 }
 
+#[tokio::test]
+async fn text_tools_report_missing_embedding_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("mcp_missing_embedding.db");
+    let executor = SqliteExecutor::open(ExecutorConfig {
+        db_path,
+        mode: RunMode::Readwrite,
+        max_rows: 500,
+        max_top_k: 100,
+        timeout_ms: 10_000,
+    })
+    .unwrap();
+
+    let server = spawn_test_server(executor, None, None).await.unwrap();
+    let client = Client::new();
+    initialize(&client, &server.url()).await;
+
+    let create = call_tool(
+        &client,
+        &server.url(),
+        2,
+        "create_text_collection",
+        json!({"collection": "docs"}),
+    )
+    .await;
+
+    assert_eq!(create["success"], false);
+    assert!(
+        create["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("embedding is not configured")
+    );
+}
+
+#[tokio::test]
+async fn upsert_texts_rejects_embedding_dimension_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("mcp_dimension_mismatch.db");
+    let executor = SqliteExecutor::open(ExecutorConfig {
+        db_path,
+        mode: RunMode::Readwrite,
+        max_rows: 500,
+        max_top_k: 100,
+        timeout_ms: 10_000,
+    })
+    .unwrap();
+    let embedding_server = spawn_sequence_embedding_server(vec![
+        json!({"data": [{"index": 0, "embedding": [1.0, 0.0]}]}),
+        json!({"data": [{"index": 0, "embedding": [1.0, 0.0, 0.0]}]}),
+    ])
+    .await;
+
+    let server = spawn_test_server(executor, None, Some(embedding_server.client()))
+        .await
+        .unwrap();
+    let client = Client::new();
+    initialize(&client, &server.url()).await;
+
+    let create = call_tool(
+        &client,
+        &server.url(),
+        2,
+        "create_text_collection",
+        json!({"collection": "docs"}),
+    )
+    .await;
+    assert_eq!(create["success"], true);
+
+    let upsert = call_tool(
+        &client,
+        &server.url(),
+        3,
+        "upsert_texts",
+        json!({
+            "collection": "docs",
+            "items": [{"id": "doc-a", "text": "alpha"}]
+        }),
+    )
+    .await;
+    assert_eq!(upsert["success"], false);
+    assert!(
+        upsert["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("embedding dimension mismatch")
+    );
+}
+
+#[tokio::test]
+async fn readonly_rejects_text_writes_before_embedding() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("mcp_readonly_text.db");
+    {
+        let writable = SqliteExecutor::open(ExecutorConfig {
+            db_path: db_path.clone(),
+            mode: RunMode::Readwrite,
+            max_rows: 500,
+            max_top_k: 100,
+            timeout_ms: 10_000,
+        })
+        .unwrap();
+        let created = writable
+            .create_text_collection_with_dimension(
+                sqlite_mcp_rs::vector::CreateTextCollectionStorageInput {
+                    collection: "docs".to_string(),
+                    dimension: 2,
+                },
+            )
+            .await;
+        assert!(created.success, "{created:?}");
+    }
+
+    let readonly = SqliteExecutor::open(ExecutorConfig {
+        db_path,
+        mode: RunMode::Readonly,
+        max_rows: 500,
+        max_top_k: 100,
+        timeout_ms: 10_000,
+    })
+    .unwrap();
+    let embedding_server = spawn_test_embedding_server().await;
+    let server = spawn_test_server(readonly, None, Some(embedding_server.client()))
+        .await
+        .unwrap();
+    let client = Client::new();
+    initialize(&client, &server.url()).await;
+
+    let upsert = call_tool(
+        &client,
+        &server.url(),
+        2,
+        "upsert_texts",
+        json!({
+            "collection": "docs",
+            "items": [{"id": "doc-a", "text": "alpha"}]
+        }),
+    )
+    .await;
+    assert_eq!(upsert["success"], false);
+    assert!(
+        upsert["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("readonly")
+    );
+    assert_eq!(embedding_server.requests.lock().unwrap().len(), 0);
+}
+
 struct TestEmbeddingServer {
     base_url: String,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -240,6 +370,69 @@ async fn spawn_test_embedding_server() -> TestEmbeddingServer {
         requests,
         shutdown,
     }
+}
+
+async fn spawn_sequence_embedding_server(responses: Vec<Value>) -> TestEmbeddingServer {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let responses = Arc::new(Mutex::new(responses));
+    let shutdown = CancellationToken::new();
+    let app = Router::new().route(
+        TEST_EMBEDDINGS_ROUTE,
+        post({
+            let requests = requests.clone();
+            let responses = responses.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                let responses = responses.clone();
+                async move {
+                    requests.lock().unwrap().push(body);
+                    let mut responses = responses.lock().unwrap();
+                    Json(responses.remove(0))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                server_shutdown.cancelled_owned().await;
+            })
+            .await;
+    });
+
+    TestEmbeddingServer {
+        base_url: format!("http://{addr}/v1"),
+        requests,
+        shutdown,
+    }
+}
+
+async fn initialize(client: &Client, url: &str) {
+    let initialize: Value = client
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0.1.0"}
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(initialize.get("result").is_some(), "{initialize}");
 }
 
 async fn call_tool(client: &Client, url: &str, id: u64, name: &str, arguments: Value) -> Value {
