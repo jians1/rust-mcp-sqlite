@@ -47,6 +47,18 @@ pub struct SearchTextInput {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct SearchHybridTextInput {
+    pub collection: String,
+    pub query: String,
+    pub top_k: usize,
+    pub filter: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fts_query: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
 pub struct DeleteTextsInput {
     pub collection: String,
     pub ids: Vec<String>,

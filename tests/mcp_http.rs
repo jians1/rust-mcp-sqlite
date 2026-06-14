@@ -56,6 +56,7 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
             "drop_text_collection",
             "execute_sql",
             "search_text",
+            "search_text_hybrid",
             "upsert_texts",
         ]
     );
@@ -235,6 +236,92 @@ async fn upsert_texts_rejects_embedding_dimension_mismatch() {
             .unwrap()
             .contains("embedding dimension mismatch")
     );
+}
+
+#[tokio::test]
+async fn search_text_hybrid_filters_fts_tags_and_metadata_over_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("mcp_hybrid.db");
+    let executor = SqliteExecutor::open(ExecutorConfig {
+        db_path,
+        mode: RunMode::Readwrite,
+        max_rows: 500,
+        max_top_k: 100,
+        timeout_ms: 10_000,
+    })
+    .unwrap();
+    let embedding_server = spawn_test_embedding_server().await;
+
+    let server = spawn_test_server(executor, None, Some(embedding_server.client()))
+        .await
+        .unwrap();
+    let client = Client::new();
+    initialize(&client, &server.url()).await;
+
+    let create = call_tool(
+        &client,
+        &server.url(),
+        2,
+        "create_text_collection",
+        json!({"collection": "docs"}),
+    )
+    .await;
+    assert_eq!(create["success"], true);
+
+    let upsert = call_tool(
+        &client,
+        &server.url(),
+        3,
+        "upsert_texts",
+        json!({
+            "collection": "docs",
+            "items": [
+                {
+                    "id": "doc-a",
+                    "text": "她没有拔剑，只是抬眼看过去，殿中喧哗便像被霜压住。",
+                    "metadata": {
+                        "tenant": "novel",
+                        "dimension": "高潮燃点",
+                        "tags": ["女主", "克制", "压迫感"]
+                    }
+                },
+                {
+                    "id": "doc-b",
+                    "text": "他站在雨里，眉眼淡得像旧雪，偏让人不敢靠近。",
+                    "metadata": {
+                        "tenant": "novel",
+                        "dimension": "人物塑造",
+                        "tags": ["男主", "克制", "压迫感"]
+                    }
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(upsert["success"], true);
+
+    let search = call_tool(
+        &client,
+        &server.url(),
+        4,
+        "search_text_hybrid",
+        json!({
+            "collection": "docs",
+            "query": "克制压迫感",
+            "top_k": 5,
+            "filter": {"tenant": "novel"},
+            "fts_query": "殿中喧哗",
+            "tags": ["女主", "克制"]
+        }),
+    )
+    .await;
+
+    assert_eq!(search["success"], true);
+    let results = search["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], json!("doc-a"));
+    assert_eq!(results[0]["metadata"]["dimension"], json!("高潮燃点"));
+    assert_eq!(embedding_server.requests.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]

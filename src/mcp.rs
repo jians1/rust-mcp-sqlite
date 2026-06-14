@@ -24,8 +24,9 @@ use crate::{
 use vector_tools::{
     CreateTextCollectionInput, CreateTextCollectionStorageInput, DeleteTextsInput,
     DescribeTextCollectionInput, DropTextCollectionInput, GeneratedTextItemInput,
-    SearchGeneratedTextInput, SearchTextInput, TextItemInput, UpsertGeneratedTextsInput,
-    UpsertTextsInput, VectorToolResponse,
+    SearchGeneratedHybridTextInput, SearchGeneratedTextInput, SearchHybridTextInput,
+    SearchTextInput, TextItemInput, UpsertGeneratedTextsInput, UpsertTextsInput,
+    VectorToolResponse,
 };
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -232,6 +233,55 @@ impl SqliteMcpServer {
                 vector,
                 top_k: input.top_k,
                 filter: input.filter,
+            })
+            .await;
+        timed_vector_result(start, response)
+    }
+
+    #[tool(
+        name = "search_text_hybrid",
+        description = "Search a text embedding collection using metadata, FTS5 trigram, tags, and cosine distance"
+    )]
+    async fn search_text_hybrid(
+        &self,
+        Parameters(input): Parameters<SearchHybridTextInput>,
+    ) -> CallToolResult {
+        let start = Instant::now();
+        if input.query.trim().is_empty() {
+            return vector_failure(start, "query must not be empty");
+        }
+
+        let description = self
+            .executor
+            .describe_text_collection(DescribeTextCollectionInput {
+                collection: input.collection.clone(),
+            })
+            .await;
+        if !description.success {
+            return timed_vector_result(start, description);
+        }
+        let dimension = match dimension_from_response(&description) {
+            Ok(dimension) => dimension,
+            Err(message) => return vector_failure(start, message),
+        };
+
+        let embedding = match self.embed(&[input.query]).await.and_then(first_embedding) {
+            Ok(embedding) => embedding,
+            Err(message) => return vector_failure(start, message),
+        };
+        if let Err(message) = validate_embedding_dimension(&embedding, dimension) {
+            return vector_failure(start, message);
+        }
+
+        let response = self
+            .executor
+            .search_generated_text_hybrid(SearchGeneratedHybridTextInput {
+                collection: input.collection,
+                vector: embedding,
+                top_k: input.top_k,
+                filter: input.filter,
+                fts_query: input.fts_query,
+                tags: input.tags,
             })
             .await;
         timed_vector_result(start, response)
