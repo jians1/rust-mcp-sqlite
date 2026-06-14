@@ -3,8 +3,8 @@ use sqlite_mcp_rs::config::RunMode;
 use sqlite_mcp_rs::response::StatementResult;
 use sqlite_mcp_rs::sqlite::{ExecutorConfig, SqliteExecutor};
 use sqlite_mcp_rs::vector::{
-    CreateVectorCollectionInput, DeleteVectorsInput, DropVectorCollectionInput, SearchVectorsInput,
-    UpsertVectorsInput, VectorItemInput,
+    CreateTextCollectionStorageInput, DeleteTextsInput, DropTextCollectionInput,
+    GeneratedTextItemInput, SearchGeneratedTextInput, UpsertGeneratedTextsInput,
 };
 
 fn temp_db_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -30,12 +30,56 @@ async fn executor(
 }
 
 #[tokio::test]
+async fn generated_text_vectors_store_text_and_search_without_vectors() {
+    let (_dir, path) = temp_db_path("generated_text_vectors.db");
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
+
+    let create = exec
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
+            collection: "docs".to_string(),
+            dimension: 2,
+        })
+        .await;
+    assert!(create.success, "{create:?}");
+
+    let upsert = exec
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
+            collection: "docs".to_string(),
+            items: vec![GeneratedTextItemInput {
+                id: "doc-a".to_string(),
+                vector: vec![1.0, 0.0],
+                text: "alpha".to_string(),
+                metadata: Some(json!({"tenant": "a"})),
+            }],
+        })
+        .await;
+    assert!(upsert.success, "{upsert:?}");
+    assert_eq!(upsert.data["upserted_count"], json!(1));
+
+    let search = exec
+        .search_generated_text(SearchGeneratedTextInput {
+            collection: "docs".to_string(),
+            vector: vec![1.0, 0.0],
+            top_k: 1,
+            filter: None,
+        })
+        .await;
+    assert!(search.success, "{search:?}");
+    let results = search.data["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], json!("doc-a"));
+    assert_eq!(results[0]["text"], json!("alpha"));
+    assert_eq!(results[0]["metadata"], json!({"tenant": "a"}));
+    assert!(results[0].get("vector").is_none());
+}
+
+#[tokio::test]
 async fn create_collection_writes_registry() {
     let (_dir, path) = temp_db_path("create_collection.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let created = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -49,7 +93,7 @@ async fn create_collection_writes_registry() {
     assert_eq!(created.data["created"], json!(true));
 
     let duplicate = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -89,7 +133,7 @@ async fn create_collection_is_idempotent_for_same_dimension() {
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let created = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -98,7 +142,7 @@ async fn create_collection_is_idempotent_for_same_dimension() {
     assert_eq!(created.data["created"], json!(true));
 
     let duplicate = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -107,7 +151,7 @@ async fn create_collection_is_idempotent_for_same_dimension() {
     assert_eq!(duplicate.data["created"], json!(false));
 
     let conflict = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 3,
         })
@@ -126,12 +170,12 @@ async fn create_collection_is_idempotent_for_same_dimension() {
 }
 
 #[tokio::test]
-async fn upsert_vectors_replaces_existing_records() {
-    let (_dir, path) = temp_db_path("upsert_vectors.db");
+async fn upsert_generated_texts_replaces_existing_records() {
+    let (_dir, path) = temp_db_path("upsert_generated_texts.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -139,12 +183,12 @@ async fn upsert_vectors_replaces_existing_records() {
     assert!(create.success, "{create:?}");
 
     let first = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: "doc-1".to_string(),
                 vector: vec![1.0, 0.0],
-                text: Some("first".to_string()),
+                text: "first".to_string(),
                 metadata: Some(json!({"source": "draft"})),
             }],
         })
@@ -153,12 +197,12 @@ async fn upsert_vectors_replaces_existing_records() {
     assert_eq!(first.data["upserted_count"], json!(1));
 
     let second = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: "doc-1".to_string(),
                 vector: vec![0.0, 1.0],
-                text: Some("second".to_string()),
+                text: "second".to_string(),
                 metadata: Some(json!({"source": "final"})),
             }],
         })
@@ -186,12 +230,12 @@ async fn upsert_vectors_replaces_existing_records() {
 }
 
 #[tokio::test]
-async fn upsert_vectors_rolls_back_entire_batch_on_invalid_item() {
-    let (_dir, path) = temp_db_path("upsert_vectors_rollback.db");
+async fn upsert_generated_texts_rolls_back_entire_batch_on_invalid_item() {
+    let (_dir, path) = temp_db_path("upsert_generated_texts_rollback.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -199,19 +243,19 @@ async fn upsert_vectors_rolls_back_entire_batch_on_invalid_item() {
     assert!(create.success, "{create:?}");
 
     let upsert = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
             items: vec![
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-a".to_string(),
                     vector: vec![1.0, 0.0],
-                    text: None,
+                    text: "text".to_string(),
                     metadata: None,
                 },
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-b".to_string(),
                     vector: vec![0.0],
-                    text: None,
+                    text: "text".to_string(),
                     metadata: None,
                 },
             ],
@@ -232,12 +276,12 @@ async fn upsert_vectors_rolls_back_entire_batch_on_invalid_item() {
 }
 
 #[tokio::test]
-async fn search_vectors_returns_top_k_without_vectors() {
-    let (_dir, path) = temp_db_path("search_vectors.db");
+async fn search_generated_text_returns_top_k_without_vectors() {
+    let (_dir, path) = temp_db_path("search_generated_text.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -245,19 +289,19 @@ async fn search_vectors_returns_top_k_without_vectors() {
     assert!(create.success, "{create:?}");
 
     let upsert = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
             items: vec![
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-a".to_string(),
                     vector: vec![1.0, 0.0],
-                    text: Some("alpha".to_string()),
+                    text: "alpha".to_string(),
                     metadata: Some(json!({"source": "manual"})),
                 },
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-b".to_string(),
                     vector: vec![0.0, 1.0],
-                    text: Some("beta".to_string()),
+                    text: "beta".to_string(),
                     metadata: Some(json!({"source": "manual"})),
                 },
             ],
@@ -266,7 +310,7 @@ async fn search_vectors_returns_top_k_without_vectors() {
     assert!(upsert.success, "{upsert:?}");
 
     let search = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 1,
@@ -291,7 +335,7 @@ async fn validation_rejects_invalid_inputs() {
     let exec = executor(path, RunMode::Readwrite, 1, 2).await;
 
     let invalid_name = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "bad-name".to_string(),
             dimension: 2,
         })
@@ -300,7 +344,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&invalid_name).contains("letters, digits, and underscores"));
 
     let reserved_name = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "__internal".to_string(),
             dimension: 2,
         })
@@ -309,7 +353,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&reserved_name).contains("must not start with __"));
 
     let zero_dimension = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 0,
         })
@@ -318,7 +362,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&zero_dimension).contains("dimension must be positive"));
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -326,12 +370,12 @@ async fn validation_rejects_invalid_inputs() {
     assert!(create.success, "{create:?}");
 
     let empty_id = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: String::new(),
                 vector: vec![1.0, 0.0],
-                text: None,
+                text: "text".to_string(),
                 metadata: None,
             }],
         })
@@ -340,12 +384,12 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&empty_id).contains("id must not be empty"));
 
     let dimension_mismatch = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: "doc-a".to_string(),
                 vector: vec![1.0],
-                text: None,
+                text: "text".to_string(),
                 metadata: None,
             }],
         })
@@ -354,12 +398,12 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&dimension_mismatch).contains("dimension mismatch"));
 
     let non_finite = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: "doc-a".to_string(),
                 vector: vec![f64::NAN, 0.0],
-                text: None,
+                text: "text".to_string(),
                 metadata: None,
             }],
         })
@@ -368,12 +412,12 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&non_finite).contains("non-finite"));
 
     let non_object_metadata = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: "doc-a".to_string(),
                 vector: vec![1.0, 0.0],
-                text: None,
+                text: "text".to_string(),
                 metadata: Some(json!(["not", "object"])),
             }],
         })
@@ -382,7 +426,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&non_object_metadata).contains("metadata must be a JSON object"));
 
     let top_k_zero = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 0,
@@ -393,7 +437,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&top_k_zero).contains("top_k must be positive"));
 
     let top_k_exceeds_max_rows_only = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 2,
@@ -406,7 +450,7 @@ async fn validation_rejects_invalid_inputs() {
     );
 
     let top_k_too_large = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 3,
@@ -417,7 +461,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&top_k_too_large).contains("max_top_k"));
 
     let invalid_filter_key = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 1,
@@ -428,7 +472,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&invalid_filter_key).contains("filter keys"));
 
     let non_object_filter = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 1,
@@ -439,7 +483,7 @@ async fn validation_rejects_invalid_inputs() {
     assert!(vector_error_message(&non_object_filter).contains("filter must be a JSON object"));
 
     let unsupported_filter_value = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 1,
@@ -454,12 +498,12 @@ async fn validation_rejects_invalid_inputs() {
 }
 
 #[tokio::test]
-async fn search_vectors_filters_metadata() {
+async fn search_generated_text_filters_metadata() {
     let (_dir, path) = temp_db_path("search_filter.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -467,19 +511,19 @@ async fn search_vectors_filters_metadata() {
     assert!(create.success, "{create:?}");
 
     let upsert = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
             items: vec![
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-near".to_string(),
                     vector: vec![1.0, 0.0],
-                    text: Some("near but wrong tenant".to_string()),
+                    text: "near but wrong tenant".to_string(),
                     metadata: Some(json!({"tenant": "b", "rank": 1})),
                 },
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-match".to_string(),
                     vector: vec![0.0, 1.0],
-                    text: Some("matching tenant".to_string()),
+                    text: "matching tenant".to_string(),
                     metadata: Some(json!({"tenant": "a", "rank": 2})),
                 },
             ],
@@ -488,7 +532,7 @@ async fn search_vectors_filters_metadata() {
     assert!(upsert.success, "{upsert:?}");
 
     let search = exec
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 5,
@@ -504,12 +548,12 @@ async fn search_vectors_filters_metadata() {
 }
 
 #[tokio::test]
-async fn delete_vectors_reports_requested_and_deleted_counts() {
-    let (_dir, path) = temp_db_path("delete_vectors.db");
+async fn delete_texts_reports_requested_and_deleted_counts() {
+    let (_dir, path) = temp_db_path("delete_texts.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -517,19 +561,19 @@ async fn delete_vectors_reports_requested_and_deleted_counts() {
     assert!(create.success, "{create:?}");
 
     let upsert = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
             items: vec![
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-a".to_string(),
                     vector: vec![1.0, 0.0],
-                    text: None,
+                    text: "text".to_string(),
                     metadata: None,
                 },
-                VectorItemInput {
+                GeneratedTextItemInput {
                     id: "doc-b".to_string(),
                     vector: vec![0.0, 1.0],
-                    text: None,
+                    text: "text".to_string(),
                     metadata: None,
                 },
             ],
@@ -538,7 +582,7 @@ async fn delete_vectors_reports_requested_and_deleted_counts() {
     assert!(upsert.success, "{upsert:?}");
 
     let deleted = exec
-        .delete_vectors(DeleteVectorsInput {
+        .delete_texts(DeleteTextsInput {
             collection: "docs".to_string(),
             ids: vec!["doc-a".to_string(), "missing".to_string()],
         })
@@ -561,12 +605,12 @@ async fn delete_vectors_reports_requested_and_deleted_counts() {
 }
 
 #[tokio::test]
-async fn drop_vector_collection_removes_table_and_registry() {
+async fn drop_text_collection_removes_table_and_registry() {
     let (_dir, path) = temp_db_path("drop_collection.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -574,7 +618,7 @@ async fn drop_vector_collection_removes_table_and_registry() {
     assert!(create.success, "{create:?}");
 
     let dropped = exec
-        .drop_vector_collection(DropVectorCollectionInput {
+        .drop_text_collection(DropTextCollectionInput {
             collection: "docs".to_string(),
         })
         .await;
@@ -596,7 +640,7 @@ async fn drop_vector_collection_removes_table_and_registry() {
     assert!(!table.success, "{table:?}");
 
     let dropped_again = exec
-        .drop_vector_collection(DropVectorCollectionInput {
+        .drop_text_collection(DropTextCollectionInput {
             collection: "docs".to_string(),
         })
         .await;
@@ -610,19 +654,19 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
     {
         let exec = executor(path.clone(), RunMode::Readwrite, 500, 100).await;
         let create = exec
-            .create_vector_collection(CreateVectorCollectionInput {
+            .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
                 collection: "docs".to_string(),
                 dimension: 2,
             })
             .await;
         assert!(create.success, "{create:?}");
         let upsert = exec
-            .upsert_vectors(UpsertVectorsInput {
+            .upsert_generated_texts(UpsertGeneratedTextsInput {
                 collection: "docs".to_string(),
-                items: vec![VectorItemInput {
+                items: vec![GeneratedTextItemInput {
                     id: "doc-a".to_string(),
                     vector: vec![1.0, 0.0],
-                    text: Some("alpha".to_string()),
+                    text: "alpha".to_string(),
                     metadata: Some(json!({"tenant": "a"})),
                 }],
             })
@@ -632,7 +676,7 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
 
     let readonly = executor(path, RunMode::Readonly, 500, 100).await;
     let search = readonly
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 1,
@@ -646,44 +690,44 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
     );
 
     let create = readonly
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "other".to_string(),
             dimension: 2,
-        })
-        .await;
+    })
+    .await;
     assert!(!create.success, "{create:?}");
-    assert!(vector_error_message(&create).contains("readonly"));
+    assert!(vector_error_message(&create).contains("create_text_collection"));
 
     let upsert = readonly
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: "doc-b".to_string(),
                 vector: vec![0.0, 1.0],
-                text: None,
+                text: "text".to_string(),
                 metadata: None,
             }],
-        })
-        .await;
+    })
+    .await;
     assert!(!upsert.success, "{upsert:?}");
-    assert!(vector_error_message(&upsert).contains("readonly"));
+    assert!(vector_error_message(&upsert).contains("upsert_texts"));
 
     let delete = readonly
-        .delete_vectors(DeleteVectorsInput {
+        .delete_texts(DeleteTextsInput {
             collection: "docs".to_string(),
             ids: vec!["doc-a".to_string()],
-        })
-        .await;
+    })
+    .await;
     assert!(!delete.success, "{delete:?}");
-    assert!(vector_error_message(&delete).contains("readonly"));
+    assert!(vector_error_message(&delete).contains("delete_texts"));
 
     let drop = readonly
-        .drop_vector_collection(DropVectorCollectionInput {
+        .drop_text_collection(DropTextCollectionInput {
             collection: "docs".to_string(),
-        })
-        .await;
+    })
+    .await;
     assert!(!drop.success, "{drop:?}");
-    assert!(vector_error_message(&drop).contains("readonly"));
+    assert!(vector_error_message(&drop).contains("drop_text_collection"));
 }
 
 #[tokio::test]
@@ -697,7 +741,7 @@ async fn readonly_search_missing_collection_returns_not_found() {
 
     let readonly = executor(path, RunMode::Readonly, 500, 100).await;
     let search = readonly
-        .search_vectors(SearchVectorsInput {
+        .search_generated_text(SearchGeneratedTextInput {
             collection: "docs".to_string(),
             vector: vec![1.0, 0.0],
             top_k: 1,
@@ -715,7 +759,7 @@ async fn execute_sql_can_query_vector_collection_tables() {
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
 
     let create = exec
-        .create_vector_collection(CreateVectorCollectionInput {
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "docs".to_string(),
             dimension: 2,
         })
@@ -723,12 +767,12 @@ async fn execute_sql_can_query_vector_collection_tables() {
     assert!(create.success, "{create:?}");
 
     let upsert = exec
-        .upsert_vectors(UpsertVectorsInput {
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
             collection: "docs".to_string(),
-            items: vec![VectorItemInput {
+            items: vec![GeneratedTextItemInput {
                 id: "doc-a".to_string(),
                 vector: vec![1.0, 0.0],
-                text: Some("alpha".to_string()),
+                text: "alpha".to_string(),
                 metadata: Some(json!({"tenant": "a"})),
             }],
         })

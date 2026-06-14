@@ -25,15 +25,19 @@ use crate::{
     },
     sql_classify::{StatementKind, classify, is_forbidden_in_mode, public_statement_type},
     vector::{
-        CreateVectorCollectionInput, DeleteVectorsInput, DropVectorCollectionInput,
-        SearchVectorsInput, UpsertVectorsInput, VectorOperation, VectorToolResponse,
-        execute_vector_operation,
+        CreateTextCollectionStorageInput, CreateVectorCollectionInput, DeleteTextsInput,
+        DeleteVectorsInput, DescribeTextCollectionInput, DropTextCollectionInput,
+        DropVectorCollectionInput, SearchGeneratedTextInput, SearchVectorsInput,
+        UpsertGeneratedTextsInput, UpsertVectorsInput, VectorOperation, VectorToolResponse,
+        create_text_storage_input, execute_vector_operation, search_generated_text_input,
+        upsert_generated_texts_input,
     },
 };
 
 #[derive(Clone)]
 pub struct SqliteExecutor {
     tx: mpsc::Sender<WorkerJob>,
+    mode: RunMode,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +88,7 @@ impl SqliteExecutor {
         let conn = Connection::open_with_flags(&config.db_path, flags)?;
         check_fts5(&conn)?;
         check_sqlite_vec(&conn)?;
+        let mode = config.mode;
         let (tx, mut rx) = mpsc::channel::<WorkerJob>(32);
 
         thread::Builder::new()
@@ -103,7 +108,14 @@ impl SqliteExecutor {
                 }
             })?;
 
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            mode,
+        })
+    }
+
+    pub fn mode(&self) -> RunMode {
+        self.mode
     }
 
     pub async fn execute(&self, sql: String) -> ExecuteSqlResponse {
@@ -157,6 +169,55 @@ impl SqliteExecutor {
     ) -> VectorToolResponse {
         self.execute_vector(VectorOperation::DropCollection(input))
             .await
+    }
+
+    pub async fn describe_text_collection(
+        &self,
+        input: DescribeTextCollectionInput,
+    ) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::DescribeCollection(input))
+            .await
+    }
+
+    pub async fn create_text_collection_with_dimension(
+        &self,
+        input: CreateTextCollectionStorageInput,
+    ) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::CreateCollection(
+            create_text_storage_input(input),
+        ))
+        .await
+    }
+
+    pub async fn upsert_generated_texts(&self, input: UpsertGeneratedTextsInput) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::UpsertVectors(upsert_generated_texts_input(
+            input,
+        )))
+        .await
+    }
+
+    pub async fn search_generated_text(&self, input: SearchGeneratedTextInput) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::SearchVectors(search_generated_text_input(
+            input,
+        )))
+        .await
+    }
+
+    pub async fn delete_texts(&self, input: DeleteTextsInput) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::DeleteVectors(DeleteVectorsInput {
+            collection: input.collection,
+            ids: input.ids,
+        }))
+        .await
+    }
+
+    pub async fn drop_text_collection(&self, input: DropTextCollectionInput) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::DropCollection(
+            DropVectorCollectionInput {
+                collection: input.collection,
+            },
+        ))
+        .await
     }
 
     async fn execute_vector(&self, operation: VectorOperation) -> VectorToolResponse {

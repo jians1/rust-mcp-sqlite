@@ -11,6 +11,7 @@ const DISTANCE_METRIC: &str = "cosine";
 
 #[derive(Clone, Debug)]
 pub enum VectorOperation {
+    DescribeCollection(DescribeTextCollectionInput),
     CreateCollection(CreateVectorCollectionInput),
     UpsertVectors(UpsertVectorsInput),
     SearchVectors(SearchVectorsInput),
@@ -57,6 +58,76 @@ pub struct DropVectorCollectionInput {
     pub collection: String,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct CreateTextCollectionInput {
+    pub collection: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct TextItemInput {
+    pub id: String,
+    pub text: String,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct UpsertTextsInput {
+    pub collection: String,
+    pub items: Vec<TextItemInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct SearchTextInput {
+    pub collection: String,
+    pub query: String,
+    pub top_k: usize,
+    pub filter: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct DeleteTextsInput {
+    pub collection: String,
+    pub ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct DropTextCollectionInput {
+    pub collection: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct DescribeTextCollectionInput {
+    pub collection: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct CreateTextCollectionStorageInput {
+    pub collection: String,
+    pub dimension: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct UpsertGeneratedTextsInput {
+    pub collection: String,
+    pub items: Vec<GeneratedTextItemInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct GeneratedTextItemInput {
+    pub id: String,
+    pub vector: Vec<f64>,
+    pub text: String,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct SearchGeneratedTextInput {
+    pub collection: String,
+    pub vector: Vec<f64>,
+    pub top_k: usize,
+    pub filter: Option<Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct VectorToolResponse {
     pub success: bool,
@@ -101,6 +172,7 @@ pub fn execute_vector_operation(
     operation: VectorOperation,
 ) -> Result<Map<String, Value>, String> {
     match operation {
+        VectorOperation::DescribeCollection(input) => describe_collection(conn, input),
         VectorOperation::CreateCollection(input) => create_collection(conn, mode, input),
         VectorOperation::UpsertVectors(input) => upsert_vectors(conn, mode, input),
         VectorOperation::SearchVectors(input) => search_vectors(conn, max_top_k, input),
@@ -109,13 +181,66 @@ pub fn execute_vector_operation(
     }
 }
 
+pub fn create_text_storage_input(
+    input: CreateTextCollectionStorageInput,
+) -> CreateVectorCollectionInput {
+    CreateVectorCollectionInput {
+        collection: input.collection,
+        dimension: input.dimension,
+    }
+}
+
+pub fn upsert_generated_texts_input(input: UpsertGeneratedTextsInput) -> UpsertVectorsInput {
+    UpsertVectorsInput {
+        collection: input.collection,
+        items: input
+            .items
+            .into_iter()
+            .map(|item| VectorItemInput {
+                id: item.id,
+                vector: item.vector,
+                text: Some(item.text),
+                metadata: item.metadata,
+            })
+            .collect(),
+    }
+}
+
+pub fn search_generated_text_input(input: SearchGeneratedTextInput) -> SearchVectorsInput {
+    SearchVectorsInput {
+        collection: input.collection,
+        vector: input.vector,
+        top_k: input.top_k,
+        filter: input.filter,
+    }
+}
+
+fn describe_collection(
+    conn: &Connection,
+    input: DescribeTextCollectionInput,
+) -> Result<Map<String, Value>, String> {
+    let collection = validate_collection_name(&input.collection)?;
+    let existing = find_collection(conn, collection)?
+        .ok_or_else(|| format!("collection not found: {collection}"))?;
+
+    Ok(Map::from_iter([
+        ("collection".to_string(), json!(collection)),
+        ("table_name".to_string(), json!(existing.table_name)),
+        ("dimension".to_string(), json!(existing.dimension)),
+        (
+            "distance_metric".to_string(),
+            json!(existing.distance_metric),
+        ),
+    ]))
+}
+
 fn create_collection(
     conn: &Connection,
     mode: RunMode,
     input: CreateVectorCollectionInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
-        return Err("readonly mode forbids create_vector_collection".to_string());
+        return Err("readonly mode forbids create_text_collection".to_string());
     }
 
     let collection = validate_collection_name(&input.collection)?;
@@ -168,7 +293,7 @@ fn upsert_vectors(
     input: UpsertVectorsInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
-        return Err("readonly mode forbids upsert_vectors".to_string());
+        return Err("readonly mode forbids upsert_texts".to_string());
     }
 
     let collection = validate_collection_name(&input.collection)?;
@@ -362,7 +487,7 @@ fn delete_vectors(
     input: DeleteVectorsInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
-        return Err("readonly mode forbids delete_vectors".to_string());
+        return Err("readonly mode forbids delete_texts".to_string());
     }
 
     let collection = validate_collection_name(&input.collection)?;
@@ -394,7 +519,7 @@ fn drop_collection(
     input: DropVectorCollectionInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
-        return Err("readonly mode forbids drop_vector_collection".to_string());
+        return Err("readonly mode forbids drop_text_collection".to_string());
     }
 
     let collection = validate_collection_name(&input.collection)?;
