@@ -153,6 +153,7 @@ Command line options:
 | `--embedding-model <model>` | none | Enables text embedding tools with this model. |
 | `--embedding-dimensions <n>` | none | Optional OpenAI-compatible embedding dimensions override. |
 | `--embedding-timeout-ms <n>` | `30000` | HTTP timeout for embedding requests. |
+| `--embedding-batch-size <n>` | `64` | Maximum number of texts sent to the embedding API in one request. Must be at least `1`. |
 
 ## MCP Client Configuration
 
@@ -356,6 +357,8 @@ SQLite value mapping:
 
 Text collection tools call the configured OpenAI-compatible embedding API internally. MCP clients send text, ids, and metadata; they do not send or receive embedding arrays. Collections use cosine distance and are stored internally as `sqlite-vec` `vec0` virtual tables named `vec_<collection>`. Each collection also maintains `fts_<collection>` for FTS5 trigram text matching and `tags_<collection>` for tags extracted from `metadata.tags`.
 
+Embedding HTTP requests retry transient `429` and `5xx` responses up to three total attempts with exponential backoff. Logs include model, input count, attempt, status or error class, and elapsed milliseconds; they do not include input text, metadata, or API keys.
+
 Start with embedding enabled:
 
 ```bash
@@ -436,7 +439,7 @@ Example success body:
 }
 ```
 
-The server embeds item text in one batch, validates the generated dimensions against the collection, and replaces the whole record for the same `id`: embedding, text, and metadata. SQLite writes are atomic.
+The server embeds item text in batches of up to `--embedding-batch-size`, validates the generated dimensions against the collection, and replaces the whole record for the same `id`: embedding, text, and metadata. SQLite writes are issued only after every embedding batch succeeds and validates.
 
 Validation rules:
 

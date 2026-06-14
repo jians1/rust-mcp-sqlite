@@ -153,6 +153,7 @@ sqlite-mcp-rs \
 | `--embedding-model <model>` | 无 | 使用该模型启用文本 embedding 工具。 |
 | `--embedding-dimensions <n>` | 无 | 可选的 OpenAI-compatible embedding 维度覆盖。 |
 | `--embedding-timeout-ms <n>` | `30000` | embedding HTTP 请求超时时间。 |
+| `--embedding-batch-size <n>` | `64` | 单次 embedding API 请求最多发送的文本条数，必须至少为 `1`。 |
 
 ## MCP 客户端配置
 
@@ -356,6 +357,8 @@ SQLite 值映射：
 
 文本集合工具会在服务内部调用配置的 OpenAI-compatible embedding API。MCP 客户端只传文本、id 和 metadata，不传也不接收向量数组。集合使用余弦距离，内部存储为名为 `vec_<collection>` 的 `sqlite-vec` `vec0` 虚拟表。每个集合还会维护用于 FTS5 trigram 文本匹配的 `fts_<collection>`，以及从 `metadata.tags` 提取标签的 `tags_<collection>`。
 
+Embedding HTTP 请求会对临时性的 `429` 和 `5xx` 响应做最多三次总尝试，并使用指数退避。日志只包含模型名、输入条数、尝试次数、状态或错误类别、耗时毫秒数，不包含输入文本、metadata 或 API key。
+
 启用 embedding 后启动：
 
 ```bash
@@ -436,7 +439,7 @@ sqlite-mcp-rs \
 }
 ```
 
-服务器会批量嵌入 item 文本，验证生成维度和集合一致，然后替换相同 `id` 的整条记录：embedding、文本和元数据。SQLite 写入是原子性的。
+服务器会按 `--embedding-batch-size` 分批生成 item 文本 embedding，验证生成维度和集合一致，然后替换相同 `id` 的整条记录：embedding、文本和 metadata。只有所有 embedding 批次成功并通过校验后，才会写入 SQLite。
 
 验证规则：
 
