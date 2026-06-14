@@ -1,4 +1,10 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -12,6 +18,7 @@ pub struct EmbeddingClient {
     config: EmbeddingRuntimeConfig,
     client: reqwest::Client,
     endpoint: String,
+    send_dimensions: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,6 +60,7 @@ impl EmbeddingClient {
             config,
             client,
             endpoint,
+            send_dimensions: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -73,7 +81,11 @@ impl EmbeddingClient {
         let request = EmbeddingRequest {
             model,
             input,
-            dimensions: self.config.dimensions,
+            dimensions: self
+                .send_dimensions
+                .load(Ordering::Relaxed)
+                .then_some(self.config.dimensions)
+                .flatten(),
         };
         let (status, text) = self.post_embedding_request(&request).await?;
         if status == StatusCode::BAD_REQUEST && request.dimensions.is_some() {
@@ -87,6 +99,7 @@ impl EmbeddingClient {
                 return Err(format_embedding_status_error(retry_status, &retry_text));
             }
 
+            self.send_dimensions.store(false, Ordering::Relaxed);
             return parse_embedding_response(&retry_text, input.len());
         }
 
