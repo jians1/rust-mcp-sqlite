@@ -1,5 +1,5 @@
 use clap::Parser;
-use sqlite_mcp_rs::config::{Cli, RunMode};
+use sqlite_mcp_rs::config::{Cli, DEFAULT_EMBEDDING_BATCH_SIZE, RunMode};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     process::Stdio,
@@ -24,6 +24,7 @@ fn cli_defaults_match_spec() {
     assert_eq!(cli.embedding_model, None);
     assert_eq!(cli.embedding_dimensions, None);
     assert_eq!(cli.embedding_timeout_ms, 30_000);
+    assert_eq!(cli.embedding_batch_size, DEFAULT_EMBEDDING_BATCH_SIZE);
 }
 
 #[test]
@@ -56,6 +57,8 @@ fn cli_accepts_readonly_and_overrides() {
         "512",
         "--embedding-timeout-ms",
         "2500",
+        "--embedding-batch-size",
+        "7",
     ]);
 
     assert_eq!(cli.host.to_string(), "0.0.0.0");
@@ -73,6 +76,7 @@ fn cli_accepts_readonly_and_overrides() {
     );
     assert_eq!(cli.embedding_dimensions, Some(512));
     assert_eq!(cli.embedding_timeout_ms, 2500);
+    assert_eq!(cli.embedding_batch_size, 7);
 }
 
 #[test]
@@ -92,6 +96,7 @@ fn runtime_config_reads_openai_api_key_when_embedding_api_key_is_absent() {
     let config = sqlite_mcp_rs::config::RuntimeConfig::from(cli);
 
     assert_eq!(config.embedding.api_key.as_deref(), Some("env-secret"));
+    assert_eq!(config.embedding.batch_size, DEFAULT_EMBEDDING_BATCH_SIZE);
 
     unsafe {
         match original {
@@ -125,7 +130,22 @@ fn binary_help_mentions_expected_flags() {
         .stdout(predicates::str::contains("--embedding-api-key"))
         .stdout(predicates::str::contains("--embedding-model"))
         .stdout(predicates::str::contains("--embedding-dimensions"))
-        .stdout(predicates::str::contains("--embedding-timeout-ms"));
+        .stdout(predicates::str::contains("--embedding-timeout-ms"))
+        .stdout(predicates::str::contains("--embedding-batch-size"));
+}
+
+#[test]
+fn cli_rejects_zero_embedding_batch_size() {
+    let err = Cli::try_parse_from([
+        "sqlite-mcp-rs",
+        "--db",
+        "/tmp/app.db",
+        "--embedding-batch-size",
+        "0",
+    ])
+    .unwrap_err();
+
+    assert!(err.to_string().contains("0"), "{err}");
 }
 
 #[test]

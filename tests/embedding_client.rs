@@ -2,7 +2,7 @@ use axum::{Json, Router, response::IntoResponse, routing::post};
 use http::StatusCode;
 use serde_json::{Value, json};
 use sqlite_mcp_rs::{
-    config::EmbeddingRuntimeConfig,
+    config::{DEFAULT_EMBEDDING_BATCH_SIZE, EmbeddingRuntimeConfig},
     embedding::{EMBEDDINGS_PATH, EmbeddingClient},
 };
 use std::sync::{Arc, Mutex};
@@ -32,6 +32,7 @@ async fn embedding_client_posts_openai_compatible_request() {
         model: Some("text-embedding-3-small".to_string()),
         dimensions: Some(2),
         timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
     })
     .unwrap();
 
@@ -72,6 +73,7 @@ async fn embedding_client_rejects_malformed_json() {
         model: Some("model".to_string()),
         dimensions: None,
         timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
     })
     .unwrap();
 
@@ -134,6 +136,7 @@ async fn embedding_client_retries_without_dimensions_after_bad_request() {
         model: Some("model".to_string()),
         dimensions: Some(2),
         timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
     })
     .unwrap();
 
@@ -201,6 +204,7 @@ async fn embedding_client_caches_dimensions_bad_request_fallback_across_clones()
         model: Some("model".to_string()),
         dimensions: Some(2),
         timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
     })
     .unwrap();
     let cloned = client.clone();
@@ -235,6 +239,7 @@ async fn embedding_client_rejects_wrong_response_count() {
         model: Some("model".to_string()),
         dimensions: None,
         timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
     })
     .unwrap();
 
@@ -269,6 +274,7 @@ async fn embedding_client_reports_non_success_status_with_body_excerpt() {
         model: Some("model".to_string()),
         dimensions: None,
         timeout_ms: 5_000,
+        batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
     })
     .unwrap();
 

@@ -39,6 +39,7 @@ async fn main() -> Result<(), AppError> {
         embedding_base_url = %runtime.embedding.base_url,
         embedding_dimensions = ?runtime.embedding.dimensions,
         embedding_timeout_ms = runtime.embedding.timeout_ms,
+        embedding_batch_size = runtime.embedding.batch_size,
         "starting sqlite-mcp-rs"
     );
 

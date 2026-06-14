@@ -1,7 +1,7 @@
 use axum::{Json, Router, routing::post};
 use reqwest::Client;
 use serde_json::{Value, json};
-use sqlite_mcp_rs::config::{EmbeddingRuntimeConfig, RunMode};
+use sqlite_mcp_rs::config::{DEFAULT_EMBEDDING_BATCH_SIZE, EmbeddingRuntimeConfig, RunMode};
 use sqlite_mcp_rs::embedding::{EMBEDDINGS_PATH, EmbeddingClient};
 use sqlite_mcp_rs::mcp::spawn_test_server;
 use sqlite_mcp_rs::sqlite::{ExecutorConfig, SqliteExecutor};
@@ -396,6 +396,7 @@ impl TestEmbeddingServer {
             model: Some("test-embedding".to_string()),
             dimensions: Some(2),
             timeout_ms: 5_000,
+            batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
         })
         .unwrap()
     }

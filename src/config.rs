@@ -2,6 +2,8 @@ use std::{env, net::IpAddr, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 
+pub const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 64;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum RunMode {
     Readonly,
@@ -37,6 +39,22 @@ pub struct Cli {
     pub embedding_dimensions: Option<usize>,
     #[arg(long, default_value_t = 30_000)]
     pub embedding_timeout_ms: u64,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_EMBEDDING_BATCH_SIZE,
+        value_parser = parse_positive_usize
+    )]
+    pub embedding_batch_size: usize,
+}
+
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid positive integer: {error}"))?;
+    if parsed == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(parsed)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +77,7 @@ pub struct EmbeddingRuntimeConfig {
     pub model: Option<String>,
     pub dimensions: Option<usize>,
     pub timeout_ms: u64,
+    pub batch_size: usize,
 }
 
 impl From<Cli> for RuntimeConfig {
@@ -82,6 +101,7 @@ impl From<Cli> for RuntimeConfig {
                 model: cli.embedding_model,
                 dimensions: cli.embedding_dimensions,
                 timeout_ms: cli.embedding_timeout_ms,
+                batch_size: cli.embedding_batch_size,
             },
         }
     }
