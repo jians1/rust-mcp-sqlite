@@ -128,6 +128,37 @@ async fn create_collection_writes_registry() {
 }
 
 #[tokio::test]
+async fn create_collection_adds_fts_and_tag_sidecars() {
+    let (_dir, path) = temp_db_path("hybrid_sidecars.db");
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
+
+    let create = exec
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
+            collection: "docs".to_string(),
+            dimension: 2,
+        })
+        .await;
+    assert!(create.success, "{create:?}");
+
+    let sidecars = exec
+        .execute(
+            "SELECT name, type
+             FROM sqlite_master
+             WHERE name IN ('fts_docs', 'tags_docs')
+             ORDER BY name;"
+                .to_string(),
+        )
+        .await;
+    assert!(sidecars.success, "{sidecars:?}");
+    let StatementResult::Query(query) = &sidecars.results[0] else {
+        panic!("expected query result");
+    };
+    assert_eq!(query.row_count, 2);
+    assert_eq!(query.rows[0]["name"], json!("fts_docs"));
+    assert_eq!(query.rows[1]["name"], json!("tags_docs"));
+}
+
+#[tokio::test]
 async fn create_collection_is_idempotent_for_same_dimension() {
     let (_dir, path) = temp_db_path("create_collection_idempotent.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
@@ -227,6 +258,69 @@ async fn upsert_generated_texts_replaces_existing_records() {
     assert_eq!(query.rows[0]["embedding"], json!("[0.000000,1.000000]"));
     assert_eq!(query.rows[0]["text"], json!("second"));
     assert_eq!(query.rows[0]["metadata"], json!(r#"{"source":"final"}"#));
+}
+
+#[tokio::test]
+async fn upsert_generated_texts_indexes_fts_and_metadata_tags() {
+    let (_dir, path) = temp_db_path("hybrid_indexing.db");
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
+
+    let create = exec
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
+            collection: "docs".to_string(),
+            dimension: 2,
+        })
+        .await;
+    assert!(create.success, "{create:?}");
+
+    let upsert = exec
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
+            collection: "docs".to_string(),
+            items: vec![GeneratedTextItemInput {
+                id: "doc-a".to_string(),
+                vector: vec![1.0, 0.0],
+                text: "她没有拔剑，只是抬眼看过去，殿中喧哗便像被霜压住。".to_string(),
+                metadata: Some(json!({
+                    "tenant": "novel",
+                    "tags": ["女主", "克制", "压迫感"]
+                })),
+            }],
+        })
+        .await;
+    assert!(upsert.success, "{upsert:?}");
+
+    let fts = exec
+        .execute(
+            "SELECT id
+             FROM fts_docs
+             WHERE fts_docs MATCH '\"殿中喧哗\"';"
+                .to_string(),
+        )
+        .await;
+    assert!(fts.success, "{fts:?}");
+    let StatementResult::Query(fts_query) = &fts.results[0] else {
+        panic!("expected query result");
+    };
+    assert_eq!(fts_query.row_count, 1);
+    assert_eq!(fts_query.rows[0]["id"], json!("doc-a"));
+
+    let tags = exec
+        .execute(
+            "SELECT tag
+             FROM tags_docs
+             WHERE item_id = 'doc-a'
+             ORDER BY tag;"
+                .to_string(),
+        )
+        .await;
+    assert!(tags.success, "{tags:?}");
+    let StatementResult::Query(tags_query) = &tags.results[0] else {
+        panic!("expected query result");
+    };
+    assert_eq!(tags_query.row_count, 3);
+    assert_eq!(tags_query.rows[0]["tag"], json!("克制"));
+    assert_eq!(tags_query.rows[1]["tag"], json!("压迫感"));
+    assert_eq!(tags_query.rows[2]["tag"], json!("女主"));
 }
 
 #[tokio::test]

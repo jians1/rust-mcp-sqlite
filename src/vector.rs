@@ -186,6 +186,7 @@ fn create_collection(
                 existing.dimension, existing.distance_metric
             ));
         }
+        create_collection_sidecars(conn, collection)?;
         return Ok(collection_response(
             collection,
             &existing.table_name,
@@ -196,6 +197,7 @@ fn create_collection(
 
     let table_name = collection_table_name(collection);
     create_vec0_table(conn, &table_name, input.dimension)?;
+    create_collection_sidecars(conn, collection)?;
     conn.execute(
         "INSERT INTO __vector_collections(name, table_name, dimension, distance_metric, created_at)
          VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
@@ -229,12 +231,19 @@ fn upsert_generated_texts(
     ensure_registry(conn)?;
     let existing = find_collection(conn, collection)?
         .ok_or_else(|| format!("collection not found: {collection}"))?;
+    create_collection_sidecars(conn, collection)?;
     let sql = format!(
         "INSERT INTO {}(id, embedding, text, metadata)
          VALUES (?1, vec_f32(?2), ?3, ?4)",
         existing.table_name
     );
     let delete_sql = format!("DELETE FROM {} WHERE id = ?1", existing.table_name);
+    let fts_table = fts_table_name(collection);
+    let tags_table = tags_table_name(collection);
+    let delete_fts_sql = format!("DELETE FROM {fts_table} WHERE id = ?1");
+    let insert_fts_sql = format!("INSERT INTO {fts_table}(id, text) VALUES (?1, ?2)");
+    let delete_tags_sql = format!("DELETE FROM {tags_table} WHERE item_id = ?1");
+    let insert_tag_sql = format!("INSERT INTO {tags_table}(item_id, tag) VALUES (?1, ?2)");
 
     for item in &input.items {
         if item.id.is_empty() {
@@ -242,6 +251,7 @@ fn upsert_generated_texts(
         }
         let vector_json = vector_to_json(&item.vector, existing.dimension)?;
         let metadata_json = metadata_to_json(item.metadata.as_ref())?;
+        let tags = metadata_tags(item.metadata.as_ref())?;
         conn.execute(&delete_sql, params![item.id])
             .map_err(|error| error.to_string())?;
         conn.execute(
@@ -249,6 +259,16 @@ fn upsert_generated_texts(
             params![item.id, vector_json, item.text.as_str(), metadata_json],
         )
         .map_err(|error| error.to_string())?;
+        conn.execute(&delete_fts_sql, params![item.id])
+            .map_err(|error| error.to_string())?;
+        conn.execute(&insert_fts_sql, params![item.id, item.text.as_str()])
+            .map_err(|error| error.to_string())?;
+        conn.execute(&delete_tags_sql, params![item.id])
+            .map_err(|error| error.to_string())?;
+        for tag in tags {
+            conn.execute(&insert_tag_sql, params![item.id, tag])
+                .map_err(|error| error.to_string())?;
+        }
     }
 
     Ok(Map::from_iter([
@@ -423,7 +443,12 @@ fn delete_texts(
     ensure_registry(conn)?;
     let existing = find_collection(conn, collection)?
         .ok_or_else(|| format!("collection not found: {collection}"))?;
+    create_collection_sidecars(conn, collection)?;
     let sql = format!("DELETE FROM {} WHERE id = ?1", existing.table_name);
+    let fts_table = fts_table_name(collection);
+    let tags_table = tags_table_name(collection);
+    let delete_fts_sql = format!("DELETE FROM {fts_table} WHERE id = ?1");
+    let delete_tags_sql = format!("DELETE FROM {tags_table} WHERE item_id = ?1");
     let mut deleted_count = 0usize;
 
     for id in &input.ids {
@@ -432,6 +457,10 @@ fn delete_texts(
         }
         deleted_count += conn
             .execute(&sql, params![id])
+            .map_err(|error| error.to_string())?;
+        conn.execute(&delete_fts_sql, params![id])
+            .map_err(|error| error.to_string())?;
+        conn.execute(&delete_tags_sql, params![id])
             .map_err(|error| error.to_string())?;
     }
 
@@ -460,7 +489,14 @@ fn drop_text_collection(
         ]));
     };
 
-    let sql = format!("DROP TABLE IF EXISTS {}", existing.table_name);
+    let fts_table = fts_table_name(collection);
+    let tags_table = tags_table_name(collection);
+    let sql = format!(
+        "DROP TABLE IF EXISTS {};
+         DROP TABLE IF EXISTS {fts_table};
+         DROP TABLE IF EXISTS {tags_table};",
+        existing.table_name
+    );
     conn.execute_batch(&sql)
         .map_err(|error| error.to_string())?;
     conn.execute(
@@ -505,6 +541,34 @@ fn metadata_to_json(metadata: Option<&Value>) -> Result<String, String> {
     }
 
     serde_json::to_string(metadata).map_err(|error| error.to_string())
+}
+
+fn metadata_tags(metadata: Option<&Value>) -> Result<Vec<String>, String> {
+    let Some(Value::Object(object)) = metadata else {
+        return Ok(Vec::new());
+    };
+    let Some(tags) = object.get("tags") else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(values) = tags else {
+        return Err("metadata.tags must be an array of strings".to_string());
+    };
+
+    let mut collected = Vec::new();
+    for value in values {
+        let Some(tag) = value.as_str() else {
+            return Err("metadata.tags must be an array of strings".to_string());
+        };
+        let tag = tag.trim();
+        if tag.is_empty() {
+            return Err("metadata.tags must not contain empty strings".to_string());
+        }
+        if !collected.iter().any(|existing: &String| existing == tag) {
+            collected.push(tag.to_string());
+        }
+    }
+
+    Ok(collected)
 }
 
 fn filter_to_map(filter: Option<&Value>) -> Result<Option<&Map<String, Value>>, String> {
@@ -607,6 +671,14 @@ fn collection_table_name(collection: &str) -> String {
     format!("vec_{collection}")
 }
 
+fn fts_table_name(collection: &str) -> String {
+    format!("fts_{collection}")
+}
+
+fn tags_table_name(collection: &str) -> String {
+    format!("tags_{collection}")
+}
+
 fn create_vec0_table(conn: &Connection, table_name: &str, dimension: usize) -> Result<(), String> {
     let sql = format!(
         "CREATE VIRTUAL TABLE {table_name} USING vec0(
@@ -615,6 +687,23 @@ fn create_vec0_table(conn: &Connection, table_name: &str, dimension: usize) -> R
            +text TEXT,
            +metadata TEXT
          );"
+    );
+    conn.execute_batch(&sql).map_err(|error| error.to_string())
+}
+
+fn create_collection_sidecars(conn: &Connection, collection: &str) -> Result<(), String> {
+    let fts_table = fts_table_name(collection);
+    let tags_table = tags_table_name(collection);
+    let sql = format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table}
+         USING fts5(id UNINDEXED, text, tokenize='trigram');
+         CREATE TABLE IF NOT EXISTS {tags_table} (
+           item_id TEXT NOT NULL,
+           tag TEXT NOT NULL,
+           PRIMARY KEY (item_id, tag)
+         );
+         CREATE INDEX IF NOT EXISTS {tags_table}_tag_item_idx
+           ON {tags_table}(tag, item_id);"
     );
     conn.execute_batch(&sql).map_err(|error| error.to_string())
 }
