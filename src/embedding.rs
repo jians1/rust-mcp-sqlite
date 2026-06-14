@@ -75,7 +75,33 @@ impl EmbeddingClient {
             input,
             dimensions: self.config.dimensions,
         };
-        let mut builder = self.client.post(&self.endpoint).json(&request);
+        let (status, text) = self.post_embedding_request(&request).await?;
+        if status == StatusCode::BAD_REQUEST && request.dimensions.is_some() {
+            let retry_request = EmbeddingRequest {
+                model,
+                input,
+                dimensions: None,
+            };
+            let (retry_status, retry_text) = self.post_embedding_request(&retry_request).await?;
+            if !retry_status.is_success() {
+                return Err(format_embedding_status_error(retry_status, &retry_text));
+            }
+
+            return parse_embedding_response(&retry_text, input.len());
+        }
+
+        if !status.is_success() {
+            return Err(format_embedding_status_error(status, &text));
+        }
+
+        parse_embedding_response(&text, input.len())
+    }
+
+    async fn post_embedding_request(
+        &self,
+        request: &EmbeddingRequest<'_>,
+    ) -> Result<(StatusCode, String), String> {
+        let mut builder = self.client.post(&self.endpoint).json(request);
         if let Some(api_key) = &self.config.api_key {
             builder = builder.bearer_auth(api_key);
         }
@@ -93,22 +119,23 @@ impl EmbeddingClient {
             .text()
             .await
             .map_err(|error| format!("embedding HTTP response read failed: {error}"))?;
-        if !status.is_success() {
-            return Err(format_embedding_status_error(status, &text));
-        }
 
-        let parsed: EmbeddingResponse = serde_json::from_str(&text)
-            .map_err(|error| format!("embedding response JSON is malformed: {error}"))?;
-        if parsed.data.len() != input.len() {
-            return Err(format!(
-                "embedding response count mismatch: expected {}, got {}",
-                input.len(),
-                parsed.data.len()
-            ));
-        }
-
-        Ok(parsed.data.into_iter().map(|item| item.embedding).collect())
+        Ok((status, text))
     }
+}
+
+fn parse_embedding_response(text: &str, expected_count: usize) -> Result<Vec<Vec<f64>>, String> {
+    let parsed: EmbeddingResponse = serde_json::from_str(text)
+        .map_err(|error| format!("embedding response JSON is malformed: {error}"))?;
+    if parsed.data.len() != expected_count {
+        return Err(format!(
+            "embedding response count mismatch: expected {}, got {}",
+            expected_count,
+            parsed.data.len()
+        ));
+    }
+
+    Ok(parsed.data.into_iter().map(|item| item.embedding).collect())
 }
 
 fn format_embedding_status_error(status: StatusCode, body: &str) -> String {

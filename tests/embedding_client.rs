@@ -1,4 +1,4 @@
-use axum::{Json, Router, routing::post};
+use axum::{Json, Router, response::IntoResponse, routing::post};
 use http::StatusCode;
 use serde_json::{Value, json};
 use sqlite_mcp_rs::{
@@ -77,6 +77,73 @@ async fn embedding_client_rejects_malformed_json() {
 
     let err = client.embed(&["alpha".to_string()]).await.unwrap_err();
     assert!(err.contains("malformed"), "{err}");
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn embedding_client_retries_without_dimensions_after_bad_request() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let shutdown = CancellationToken::new();
+    let app = Router::new().route(
+        TEST_EMBEDDINGS_ROUTE,
+        post({
+            let requests = requests.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    requests.lock().unwrap().push(body.clone());
+                    if body.get("dimensions").is_some() {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": {
+                                    "message": "parameter validation failed"
+                                }
+                            })),
+                        )
+                            .into_response()
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "data": [
+                                    {"index": 0, "embedding": [0.1, 0.2]}
+                                ]
+                            })),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                server_shutdown.cancelled_owned().await;
+            })
+            .await;
+    });
+
+    let client = EmbeddingClient::new(EmbeddingRuntimeConfig {
+        base_url: format!("http://{addr}/v1"),
+        api_key: None,
+        model: Some("model".to_string()),
+        dimensions: Some(2),
+        timeout_ms: 5_000,
+    })
+    .unwrap();
+
+    let embeddings = client.embed(&["alpha".to_string()]).await.unwrap();
+
+    assert_eq!(embeddings, vec![vec![0.1, 0.2]]);
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0]["dimensions"], 2);
+    assert!(captured[1].get("dimensions").is_none());
     shutdown.cancel();
 }
 
