@@ -37,6 +37,7 @@ execute_sql
 create_text_collection
 upsert_texts
 search_text
+search_text_hybrid
 delete_texts
 drop_text_collection
 ```
@@ -49,6 +50,7 @@ drop_text_collection
 | `create_text_collection` | 使用配置的 embedding 模型维度创建命名 sqlite-vec 集合。 | 仅 `readwrite`。 |
 | `upsert_texts` | 工具内部生成文本 embedding，并插入或替换集合记录。 | 仅 `readwrite`。 |
 | `search_text` | 工具内部生成查询 embedding，并按余弦距离搜索集合。 | `readonly` 和 `readwrite`。 |
+| `search_text_hybrid` | 工具内部生成查询 embedding，可选按 metadata、FTS5 trigram 文本和 metadata tags 过滤，再按余弦距离排序。 | `readonly` 和 `readwrite`。 |
 | `delete_texts` | 按 id 删除文本记录。 | 仅 `readwrite`。 |
 | `drop_text_collection` | 删除文本 embedding 集合及注册表元数据。 | 仅 `readwrite`。 |
 
@@ -352,7 +354,7 @@ SQLite 值映射：
 
 ## 文本 Embedding 集合
 
-文本集合工具会在服务内部调用配置的 OpenAI-compatible embedding API。MCP 客户端只传文本、id 和 metadata，不传也不接收向量数组。集合使用余弦距离，内部存储为名为 `vec_<collection>` 的 `sqlite-vec` `vec0` 虚拟表。
+文本集合工具会在服务内部调用配置的 OpenAI-compatible embedding API。MCP 客户端只传文本、id 和 metadata，不传也不接收向量数组。集合使用余弦距离，内部存储为名为 `vec_<collection>` 的 `sqlite-vec` `vec0` 虚拟表。每个集合还会维护用于 FTS5 trigram 文本匹配的 `fts_<collection>`，以及从 `metadata.tags` 提取标签的 `tags_<collection>`。
 
 启用 embedding 后启动：
 
@@ -369,6 +371,17 @@ sqlite-mcp-rs \
 - `id`：非空字符串
 - `text`：非空字符串
 - `metadata`：可选 JSON 对象，省略时存储为 `{}`
+
+混合搜索会读取 `metadata.tags`，前提是它是字符串数组。例如：
+
+```json
+{
+  "tenant": "novel",
+  "dimension": "高潮燃点",
+  "score": 9,
+  "tags": ["女主", "克制", "压迫感"]
+}
+```
 
 文本集合工具返回与 `execute_sql` 相同的 MCP 形状：包含 JSON 封装的文本内容项。失败封装示例：
 
@@ -431,6 +444,7 @@ sqlite-mcp-rs \
 - `id` 必须非空。
 - `text` 必须非空。
 - `metadata` 存在时必须是 JSON 对象。
+- `metadata.tags` 存在时必须是非空字符串数组。
 
 ### search_text
 
@@ -467,6 +481,26 @@ sqlite-mcp-rs \
 }
 ```
 
+### search_text_hybrid
+
+```json
+{
+  "collection": "novel_analysis",
+  "query": "克制但有压迫感的女主爆发",
+  "top_k": 10,
+  "filter": {
+    "tenant": "novel",
+    "dimension": "高潮燃点"
+  },
+  "fts_query": "殿中喧哗",
+  "tags": ["女主", "克制"]
+}
+```
+
+服务器会在内部嵌入 `query`，先应用可选的顶层 metadata 过滤、可选的 FTS5 trigram 文本匹配、可选的标签过滤，然后对剩余候选按余弦距离排序。`fts_query` 会被当作普通文本处理，按空白分词，为 FTS5 加引号，并用 `AND` 组合。FTS5 trigram 适合中文短语和子串匹配，但非常短的查询更适合表达为 tag 或 metadata 过滤。
+
+`tags` 要求每个列出的标签都存在于 `metadata.tags` 中。混合搜索返回与 `search_text` 相同的结果结构。
+
 ### delete_texts
 
 ```json
@@ -494,7 +528,7 @@ sqlite-mcp-rs \
 
 ```json
 {
-  "sql": "SELECT name, table_name, dimension, distance_metric, created_at FROM __vector_collections; SELECT id, text, metadata FROM vec_docs LIMIT 10;"
+  "sql": "SELECT name, table_name, dimension, distance_metric, created_at FROM __vector_collections; SELECT id, text, metadata FROM vec_docs LIMIT 10; SELECT id, text FROM fts_docs LIMIT 10; SELECT item_id, tag FROM tags_docs LIMIT 10;"
 }
 ```
 
@@ -558,6 +592,27 @@ sqlite-mcp-rs \
 }
 ```
 
+混合搜索：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "tools/call",
+  "params": {
+    "name": "search_text_hybrid",
+    "arguments": {
+      "collection": "docs",
+      "query": "克制压迫感",
+      "top_k": 5,
+      "filter": {"tenant": "a"},
+      "fts_query": "殿中喧哗",
+      "tags": ["女主", "克制"]
+    }
+  }
+}
+```
+
 ## 模式与安全
 
 ### readonly
@@ -571,7 +626,7 @@ SELECT * FROM users LIMIT 10;
 PRAGMA table_info(users);
 ```
 
-`search_text` 在 readonly 模式下也是允许的。
+`search_text` 和 `search_text_hybrid` 在 readonly 模式下也是允许的。
 
 拒绝的示例：
 

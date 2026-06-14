@@ -37,6 +37,7 @@ execute_sql
 create_text_collection
 upsert_texts
 search_text
+search_text_hybrid
 delete_texts
 drop_text_collection
 ```
@@ -49,6 +50,7 @@ Tool summary:
 | `create_text_collection` | Create a named sqlite-vec collection using the configured embedding model dimension. | `readwrite` only. |
 | `upsert_texts` | Embed text items internally and insert or replace them in a collection. | `readwrite` only. |
 | `search_text` | Embed a query internally and search by cosine distance. | `readonly` and `readwrite`. |
+| `search_text_hybrid` | Embed a query internally, optionally filter by metadata, FTS5 trigram text, and metadata tags, then rank by cosine distance. | `readonly` and `readwrite`. |
 | `delete_texts` | Delete text records by id. | `readwrite` only. |
 | `drop_text_collection` | Drop a text embedding collection and registry metadata. | `readwrite` only. |
 
@@ -352,7 +354,7 @@ SQLite value mapping:
 
 ## Text Embedding Collections
 
-Text collection tools call the configured OpenAI-compatible embedding API internally. MCP clients send text, ids, and metadata; they do not send or receive embedding arrays. Collections use cosine distance and are stored internally as `sqlite-vec` `vec0` virtual tables named `vec_<collection>`.
+Text collection tools call the configured OpenAI-compatible embedding API internally. MCP clients send text, ids, and metadata; they do not send or receive embedding arrays. Collections use cosine distance and are stored internally as `sqlite-vec` `vec0` virtual tables named `vec_<collection>`. Each collection also maintains `fts_<collection>` for FTS5 trigram text matching and `tags_<collection>` for tags extracted from `metadata.tags`.
 
 Start with embedding enabled:
 
@@ -369,6 +371,17 @@ Collection names must contain only ASCII letters, digits, and underscores, and m
 - `id`: non-empty string
 - `text`: non-empty string
 - `metadata`: optional JSON object, stored as `{}` when omitted
+
+Hybrid search reads tags from `metadata.tags` when it is an array of strings. For example:
+
+```json
+{
+  "tenant": "novel",
+  "dimension": "高潮燃点",
+  "score": 9,
+  "tags": ["女主", "克制", "压迫感"]
+}
+```
 
 Text collection tools return the same MCP shape as `execute_sql`: a text content item containing a JSON envelope. Failed envelopes look like:
 
@@ -431,6 +444,7 @@ Validation rules:
 - `id` must be non-empty.
 - `text` must be non-empty.
 - `metadata`, when present, must be a JSON object.
+- `metadata.tags`, when present, must be an array of non-empty strings.
 
 ### search_text
 
@@ -467,6 +481,26 @@ Example success body:
 }
 ```
 
+### search_text_hybrid
+
+```json
+{
+  "collection": "novel_analysis",
+  "query": "克制但有压迫感的女主爆发",
+  "top_k": 10,
+  "filter": {
+    "tenant": "novel",
+    "dimension": "高潮燃点"
+  },
+  "fts_query": "殿中喧哗",
+  "tags": ["女主", "克制"]
+}
+```
+
+The server embeds `query` internally, applies optional top-level metadata filters, optional FTS5 trigram text matching, and optional tag filters, then ranks the remaining candidates by cosine distance. `fts_query` is treated as plain text, split on whitespace, quoted for FTS5, and combined with `AND`. FTS5 trigram is useful for Chinese phrase and substring matching, but very short queries may be better expressed as tags or metadata filters.
+
+`tags` require every listed tag to be present in `metadata.tags`. Hybrid search returns the same result shape as `search_text`.
+
 ### delete_texts
 
 ```json
@@ -494,7 +528,7 @@ Text collection tools are convenience wrappers over SQLite state. Advanced users
 
 ```json
 {
-  "sql": "SELECT name, table_name, dimension, distance_metric, created_at FROM __vector_collections; SELECT id, text, metadata FROM vec_docs LIMIT 10;"
+  "sql": "SELECT name, table_name, dimension, distance_metric, created_at FROM __vector_collections; SELECT id, text, metadata FROM vec_docs LIMIT 10; SELECT id, text FROM fts_docs LIMIT 10; SELECT item_id, tag FROM tags_docs LIMIT 10;"
 }
 ```
 
@@ -558,6 +592,27 @@ Upsert and search:
 }
 ```
 
+Hybrid search:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "tools/call",
+  "params": {
+    "name": "search_text_hybrid",
+    "arguments": {
+      "collection": "docs",
+      "query": "克制压迫感",
+      "top_k": 5,
+      "filter": {"tenant": "a"},
+      "fts_query": "殿中喧哗",
+      "tags": ["女主", "克制"]
+    }
+  }
+}
+```
+
 ## Modes And Safety
 
 ### readonly
@@ -571,7 +626,7 @@ SELECT * FROM users LIMIT 10;
 PRAGMA table_info(users);
 ```
 
-`search_text` is also allowed in readonly mode.
+`search_text` and `search_text_hybrid` are also allowed in readonly mode.
 
 Rejected examples:
 
