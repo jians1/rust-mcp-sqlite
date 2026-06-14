@@ -54,12 +54,18 @@ impl SqliteMcpServer {
 const EMBEDDING_DIMENSION_PROBE: &str = "sqlite-mcp-rs embedding dimension probe";
 
 impl SqliteMcpServer {
-    async fn embed(&self, input: &[String]) -> Result<Vec<Vec<f64>>, String> {
-        let client = self
-            .embeddings
+    fn embedding_client(&self) -> Result<&EmbeddingClient, String> {
+        self.embeddings
             .as_ref()
-            .ok_or_else(|| "embedding is not configured; set --embedding-model".to_string())?;
-        client.embed(input).await
+            .ok_or_else(|| "embedding is not configured; set --embedding-model".to_string())
+    }
+
+    async fn embed(&self, input: &[String]) -> Result<Vec<Vec<f64>>, String> {
+        self.embedding_client()?.embed(input).await
+    }
+
+    fn embedding_batch_size(&self) -> Result<usize, String> {
+        Ok(self.embedding_client()?.batch_size())
     }
 }
 
@@ -131,14 +137,15 @@ impl SqliteMcpServer {
         if self.executor.mode() == RunMode::Readonly {
             return vector_failure(start, "readonly mode forbids upsert_texts");
         }
-        if let Err(message) = validate_text_items(&input.items) {
+        let UpsertTextsInput { collection, items } = input;
+        if let Err(message) = validate_text_items(&items) {
             return vector_failure(start, message);
         }
 
         let description = self
             .executor
             .describe_text_collection(DescribeTextCollectionInput {
-                collection: input.collection.clone(),
+                collection: collection.clone(),
             })
             .await;
         if !description.success {
@@ -149,44 +156,69 @@ impl SqliteMcpServer {
             Err(message) => return vector_failure(start, message),
         };
 
-        let texts = input
-            .items
-            .iter()
-            .map(|item| item.text.clone())
-            .collect::<Vec<_>>();
-        let embeddings = match self.embed(&texts).await {
-            Ok(embeddings) => embeddings,
+        let batch_size = match self.embedding_batch_size() {
+            Ok(batch_size) => batch_size,
             Err(message) => return vector_failure(start, message),
         };
-        if embeddings.len() != input.items.len() {
-            return vector_failure(
-                start,
-                format!(
-                    "embedding response count mismatch: expected {}, got {}",
-                    input.items.len(),
-                    embeddings.len()
-                ),
-            );
-        }
 
-        let mut generated_items = Vec::with_capacity(input.items.len());
-        for (item, embedding) in input.items.into_iter().zip(embeddings) {
-            if let Err(message) = validate_embedding_dimension(&embedding, dimension) {
-                return vector_failure(start, message);
+        let mut generated_items = Vec::with_capacity(items.len());
+        for (batch_index, batch) in items.chunks(batch_size).enumerate() {
+            let batch_start_index = batch_index * batch_size;
+            let texts = batch
+                .iter()
+                .map(|item| item.text.clone())
+                .collect::<Vec<_>>();
+            let embeddings = match self.embed(&texts).await {
+                Ok(embeddings) => embeddings,
+                Err(message) => {
+                    return vector_failure(
+                        start,
+                        upsert_batch_error(batch_index, batch_start_index, batch, &message),
+                    );
+                }
+            };
+            if embeddings.len() != batch.len() {
+                return vector_failure(
+                    start,
+                    upsert_batch_error(
+                        batch_index,
+                        batch_start_index,
+                        batch,
+                        &format!(
+                            "embedding response count mismatch: expected {}, got {}",
+                            batch.len(),
+                            embeddings.len()
+                        ),
+                    ),
+                );
             }
-            let vector = embedding;
-            generated_items.push(GeneratedTextItemInput {
-                id: item.id,
-                text: item.text,
-                vector,
-                metadata: item.metadata,
-            });
+
+            for (item_offset, (item, embedding)) in batch.iter().zip(embeddings).enumerate() {
+                if let Err(message) = validate_embedding_dimension(&embedding, dimension) {
+                    return vector_failure(
+                        start,
+                        upsert_item_error(
+                            batch_index,
+                            batch_start_index,
+                            batch,
+                            item_offset,
+                            &message,
+                        ),
+                    );
+                }
+                generated_items.push(GeneratedTextItemInput {
+                    id: item.id.clone(),
+                    text: item.text.clone(),
+                    vector: embedding,
+                    metadata: item.metadata.clone(),
+                });
+            }
         }
 
         let response = self
             .executor
             .upsert_generated_texts(UpsertGeneratedTextsInput {
-                collection: input.collection,
+                collection,
                 items: generated_items,
             })
             .await;
@@ -350,6 +382,57 @@ fn validate_text_items(items: &[TextItemInput]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn upsert_batch_error(
+    batch_index: usize,
+    batch_start_index: usize,
+    batch: &[TextItemInput],
+    message: &str,
+) -> String {
+    format!(
+        "upsert_texts batch {} failed (items {}, ids: {}): {}",
+        batch_index + 1,
+        item_range(batch_start_index, batch),
+        summarize_item_ids(batch),
+        message
+    )
+}
+
+fn upsert_item_error(
+    batch_index: usize,
+    batch_start_index: usize,
+    batch: &[TextItemInput],
+    item_offset: usize,
+    message: &str,
+) -> String {
+    let item = &batch[item_offset];
+    format!(
+        "upsert_texts batch {} failed (items {}, item id: {}): {}",
+        batch_index + 1,
+        item_range(batch_start_index, batch),
+        item.id,
+        message
+    )
+}
+
+fn item_range(batch_start_index: usize, batch: &[TextItemInput]) -> String {
+    let start = batch_start_index + 1;
+    let end = batch_start_index + batch.len();
+    format!("{start}-{end}")
+}
+
+fn summarize_item_ids(batch: &[TextItemInput]) -> String {
+    let mut ids = batch
+        .iter()
+        .take(5)
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if batch.len() > 5 {
+        ids.push_str(", ...");
+    }
+    ids
 }
 
 fn dimension_from_response(response: &VectorToolResponse) -> Result<usize, String> {

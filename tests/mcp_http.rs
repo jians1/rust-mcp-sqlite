@@ -382,6 +382,152 @@ async fn readonly_rejects_text_writes_before_embedding() {
     assert_eq!(embedding_server.requests.lock().unwrap().len(), 0);
 }
 
+#[tokio::test]
+async fn upsert_texts_embeds_in_configured_batches_and_writes_all_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("mcp_batch_upsert.db");
+    let executor = SqliteExecutor::open(ExecutorConfig {
+        db_path,
+        mode: RunMode::Readwrite,
+        max_rows: 500,
+        max_top_k: 100,
+        timeout_ms: 10_000,
+    })
+    .unwrap();
+    let embedding_server = spawn_test_embedding_server().await;
+
+    let server = spawn_test_server(
+        executor,
+        None,
+        Some(embedding_server.client_with_batch_size(2)),
+    )
+    .await
+    .unwrap();
+    let client = Client::new();
+    initialize(&client, &server.url()).await;
+
+    let create = call_tool(
+        &client,
+        &server.url(),
+        2,
+        "create_text_collection",
+        json!({"collection": "docs"}),
+    )
+    .await;
+    assert_eq!(create["success"], true);
+
+    let upsert = call_tool(
+        &client,
+        &server.url(),
+        3,
+        "upsert_texts",
+        json!({
+            "collection": "docs",
+            "items": [
+                {"id": "doc-a", "text": "alpha"},
+                {"id": "doc-b", "text": "beta"},
+                {"id": "doc-c", "text": "gamma"},
+                {"id": "doc-d", "text": "delta"},
+                {"id": "doc-e", "text": "epsilon"}
+            ]
+        }),
+    )
+    .await;
+
+    assert_eq!(upsert["success"], true);
+    assert_eq!(upsert["upserted_count"], 5);
+
+    let count = call_tool(
+        &client,
+        &server.url(),
+        4,
+        "execute_sql",
+        json!({"sql": "SELECT COUNT(*) AS count FROM vec_docs"}),
+    )
+    .await;
+    assert_eq!(count["success"], true);
+    assert_eq!(count["results"][0]["rows"][0]["count"], 5);
+
+    let requests = embedding_server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0]["input"],
+        json!(["sqlite-mcp-rs embedding dimension probe"])
+    );
+    assert_eq!(requests[1]["input"], json!(["alpha", "beta"]));
+    assert_eq!(requests[2]["input"], json!(["gamma", "delta"]));
+    assert_eq!(requests[3]["input"], json!(["epsilon"]));
+}
+
+#[tokio::test]
+async fn upsert_texts_reports_batch_and_item_id_for_dimension_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("mcp_batch_error_context.db");
+    let executor = SqliteExecutor::open(ExecutorConfig {
+        db_path,
+        mode: RunMode::Readwrite,
+        max_rows: 500,
+        max_top_k: 100,
+        timeout_ms: 10_000,
+    })
+    .unwrap();
+    let embedding_server = spawn_sequence_embedding_server(vec![
+        json!({"data": [{"index": 0, "embedding": [1.0, 0.0]}]}),
+        json!({
+            "data": [
+                {"index": 0, "embedding": [1.0, 0.0]},
+                {"index": 1, "embedding": [1.0, 0.0, 0.0]}
+            ]
+        }),
+    ])
+    .await;
+
+    let server = spawn_test_server(
+        executor,
+        None,
+        Some(embedding_server.client_with_batch_size(2)),
+    )
+    .await
+    .unwrap();
+    let client = Client::new();
+    initialize(&client, &server.url()).await;
+
+    let create = call_tool(
+        &client,
+        &server.url(),
+        2,
+        "create_text_collection",
+        json!({"collection": "docs"}),
+    )
+    .await;
+    assert_eq!(create["success"], true);
+
+    let upsert = call_tool(
+        &client,
+        &server.url(),
+        3,
+        "upsert_texts",
+        json!({
+            "collection": "docs",
+            "items": [
+                {"id": "doc-a", "text": "alpha"},
+                {"id": "doc-b", "text": "beta"}
+            ]
+        }),
+    )
+    .await;
+
+    assert_eq!(upsert["success"], false);
+    let message = upsert["error"]["message"].as_str().unwrap();
+    assert!(message.contains("upsert_texts batch 1"), "{message}");
+    assert!(message.contains("items 1-2"), "{message}");
+    assert!(message.contains("doc-b"), "{message}");
+    assert!(
+        message.contains("embedding dimension mismatch"),
+        "{message}"
+    );
+}
+
 struct TestEmbeddingServer {
     base_url: String,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -390,13 +536,17 @@ struct TestEmbeddingServer {
 
 impl TestEmbeddingServer {
     fn client(&self) -> EmbeddingClient {
+        self.client_with_batch_size(DEFAULT_EMBEDDING_BATCH_SIZE)
+    }
+
+    fn client_with_batch_size(&self, batch_size: usize) -> EmbeddingClient {
         EmbeddingClient::new(EmbeddingRuntimeConfig {
             base_url: self.base_url.clone(),
             api_key: None,
             model: Some("test-embedding".to_string()),
             dimensions: Some(2),
             timeout_ms: 5_000,
-            batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
+            batch_size,
         })
         .unwrap()
     }
