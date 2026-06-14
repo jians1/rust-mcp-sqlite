@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod embedding;
 pub mod error;
 pub mod mcp;
 pub mod response;

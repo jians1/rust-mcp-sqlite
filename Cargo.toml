@@ -12,6 +12,7 @@ clap = { version = "4.5", features = ["derive"] }
 fallible-iterator = "0.3"
 http = "1"
 rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks", "modern_sqlite"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +28,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
