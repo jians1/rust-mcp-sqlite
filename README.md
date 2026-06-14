@@ -4,7 +4,7 @@
 
 Rust SQLite MCP server over Streamable HTTP.
 
-Use it when an MCP client needs to inspect or modify one SQLite database file through SQL and optional vector collection tools.
+Use it when an MCP client needs to inspect or modify one SQLite database file through SQL and optional text embedding collection tools.
 
 ## Quick Start
 
@@ -34,11 +34,11 @@ Then configure your MCP client to use Streamable HTTP with that URL. The server 
 
 ```text
 execute_sql
-create_vector_collection
-upsert_vectors
-search_vectors
-delete_vectors
-drop_vector_collection
+create_text_collection
+upsert_texts
+search_text
+delete_texts
+drop_text_collection
 ```
 
 Tool summary:
@@ -46,11 +46,11 @@ Tool summary:
 | Tool | Purpose | Mode |
 | --- | --- | --- |
 | `execute_sql` | Run SQLite SQL against the configured database. | Reads in `readonly`; reads and writes in `readwrite`. |
-| `create_vector_collection` | Create a named sqlite-vec collection. | `readwrite` only. |
-| `upsert_vectors` | Insert or replace client-provided embeddings. | `readwrite` only. |
-| `search_vectors` | Search a collection by cosine distance. | `readonly` and `readwrite`. |
-| `delete_vectors` | Delete vector records by id. | `readwrite` only. |
-| `drop_vector_collection` | Drop a vector collection and registry metadata. | `readwrite` only. |
+| `create_text_collection` | Create a named sqlite-vec collection using the configured embedding model dimension. | `readwrite` only. |
+| `upsert_texts` | Embed text items internally and insert or replace them in a collection. | `readwrite` only. |
+| `search_text` | Embed a query internally and search by cosine distance. | `readonly` and `readwrite`. |
+| `delete_texts` | Delete text records by id. | `readwrite` only. |
+| `drop_text_collection` | Drop a text embedding collection and registry metadata. | `readwrite` only. |
 
 ## Install
 
@@ -121,6 +121,7 @@ sqlite-mcp-rs \
   --mode readwrite \
   --auth-token "$MCP_AUTH_TOKEN" \
   --max-rows 500 \
+  --max-top-k 100 \
   --timeout-ms 10000
 ```
 
@@ -143,7 +144,13 @@ Command line options:
 | `--mode <mode>` | `readwrite` | `readonly` or `readwrite`. |
 | `--auth-token <token>` | none | Enables Bearer token auth for every HTTP request. |
 | `--max-rows <n>` | `500` | Maximum returned rows per statement that produces rows. |
+| `--max-top-k <n>` | `100` | Maximum `top_k` accepted by `search_text`. |
 | `--timeout-ms <n>` | `10000` | Timeout for the whole `execute_sql` call. |
+| `--embedding-base-url <url>` | `https://api.openai.com/v1` | OpenAI-compatible API base URL. |
+| `--embedding-api-key <key>` | `OPENAI_API_KEY` env var | Bearer token for the embedding API. |
+| `--embedding-model <model>` | none | Enables text embedding tools with this model. |
+| `--embedding-dimensions <n>` | none | Optional OpenAI-compatible embedding dimensions override. |
+| `--embedding-timeout-ms <n>` | `30000` | HTTP timeout for embedding requests. |
 
 ## MCP Client Configuration
 
@@ -343,46 +350,49 @@ SQLite value mapping:
 - `TEXT` -> JSON string
 - `BLOB` -> `{"type":"blob","encoding":"base64","data":"..."}`
 
-## Vector Collections
+## Text Embedding Collections
 
-Vector support uses SQLite with `sqlite-vec`. Embeddings are supplied by the client as JSON number arrays; this server does not generate embeddings or call model APIs. Collections use cosine distance and are stored as `vec0` virtual tables named `vec_<collection>`.
+Text collection tools call the configured OpenAI-compatible embedding API internally. MCP clients send text, ids, and metadata; they do not send or receive embedding arrays. Collections use cosine distance and are stored internally as `sqlite-vec` `vec0` virtual tables named `vec_<collection>`.
+
+Start with embedding enabled:
+
+```bash
+export OPENAI_API_KEY='sk-...'
+
+sqlite-mcp-rs \
+  --db ./app.db \
+  --embedding-model text-embedding-3-small
+```
 
 Collection names must contain only ASCII letters, digits, and underscores, and must not start with `__`. Each record has:
 
 - `id`: non-empty string
-- `vector`: JSON number array matching the collection dimension
-- `text`: optional string
+- `text`: non-empty string
 - `metadata`: optional JSON object, stored as `{}` when omitted
 
-Vector tools return the same MCP shape as `execute_sql`: a text content item containing a JSON envelope. Successful vector envelopes include:
-
-- `success`: `true`
-- `collection`: the collection name, when relevant
-- operation-specific fields such as `created`, `upserted_count`, `results`, `requested_count`, `deleted_count`, or `existed`
-- `elapsed_ms`
-
-Failed vector envelopes include:
+Text collection tools return the same MCP shape as `execute_sql`: a text content item containing a JSON envelope. Failed envelopes look like:
 
 ```json
 {
   "success": false,
   "error": {
-    "message": "vector dimension mismatch: expected 1536, got 768"
+    "message": "embedding is not configured; set --embedding-model"
   },
   "elapsed_ms": 0
 }
 ```
 
-### create_vector_collection
+Embedding model tokens are still used to create embeddings. The token saving is that chat models no longer need to move thousands of floating point numbers through MCP tool calls.
+
+### create_text_collection
 
 ```json
 {
-  "collection": "docs",
-  "dimension": 1536
+  "collection": "docs"
 }
 ```
 
-Creates `vec_docs` and records metadata in `__vector_collections`. Calling it again with the same dimension succeeds with `"created": false`; a different dimension returns an error.
+The server embeds a probe string to determine the configured model dimension, creates `vec_docs`, and records metadata in `__vector_collections`. Calling it again with the same dimension succeeds with `"created": false`; a different dimension returns an error.
 
 Example success body:
 
@@ -398,7 +408,7 @@ Example success body:
 }
 ```
 
-### upsert_vectors
+### upsert_texts
 
 ```json
 {
@@ -406,36 +416,34 @@ Example success body:
   "items": [
     {
       "id": "doc-1",
-      "vector": [0.12, -0.03, 0.88],
-      "text": "chunk text",
+      "text": "SQLite is an embedded relational database.",
       "metadata": {"source": "manual", "tenant": "a"}
     }
   ]
 }
 ```
 
-Upsert replaces the whole record for the same `id`: vector, text, and metadata. Batches are atomic.
+The server embeds item text in one batch, validates the generated dimensions against the collection, and replaces the whole record for the same `id`: embedding, text, and metadata. SQLite writes are atomic.
 
 Validation rules:
 
 - `items` may contain one or more records.
 - `id` must be non-empty.
-- `vector` length must match the collection dimension.
-- vector values must be finite JSON numbers.
+- `text` must be non-empty.
 - `metadata`, when present, must be a JSON object.
 
-### search_vectors
+### search_text
 
 ```json
 {
   "collection": "docs",
-  "vector": [0.12, -0.03, 0.88],
+  "query": "embedded database",
   "top_k": 5,
   "filter": {"tenant": "a", "source": "manual"}
 }
 ```
 
-Results include `id`, `distance`, `text`, and `metadata`. Stored vectors are not returned by default. `top_k` must be positive and no larger than `--max-rows`.
+The server embeds `query` internally and searches by cosine distance. Results include `id`, `distance`, `text`, and `metadata`; vectors are not returned. `top_k` must be positive and no larger than `--max-top-k`.
 
 Filters are optional top-level metadata equality checks. Filter keys must be simple identifiers, and values must be scalar JSON values: string, number, boolean, or null. Nested paths, arrays, objects, ranges, and contains queries are not supported.
 
@@ -451,7 +459,7 @@ Example success body:
     {
       "id": "doc-1",
       "distance": 0.0,
-      "text": "chunk text",
+      "text": "SQLite is an embedded relational database.",
       "metadata": {"source": "manual", "tenant": "a"}
     }
   ],
@@ -459,7 +467,7 @@ Example success body:
 }
 ```
 
-### delete_vectors
+### delete_texts
 
 ```json
 {
@@ -470,7 +478,7 @@ Example success body:
 
 Deletes matching ids and returns `requested_count` and `deleted_count`. Missing ids are not errors.
 
-### drop_vector_collection
+### drop_text_collection
 
 ```json
 {
@@ -482,7 +490,7 @@ Drops the collection table and removes its registry row. Dropping a missing coll
 
 ### SQL Inspection
 
-The vector tools are convenience wrappers over SQLite state. Advanced users can inspect the registry and collection tables through `execute_sql`:
+Text collection tools are convenience wrappers over SQLite state. Advanced users can inspect the registry and collection tables through `execute_sql`:
 
 ```json
 {
@@ -490,27 +498,11 @@ The vector tools are convenience wrappers over SQLite state. Advanced users can 
 }
 ```
 
-Vector tables can also be queried directly with sqlite-vec functions. This works for collections created by the vector tools:
-
-```json
-{
-  "sql": "SELECT id, distance FROM vec_docs WHERE embedding MATCH vec_f32('[0.12,-0.03,0.88]') ORDER BY distance LIMIT 5;"
-}
-```
-
-Advanced users may also create sqlite-vec tables directly through `execute_sql`:
-
-```json
-{
-  "sql": "CREATE VIRTUAL TABLE vec_direct USING vec0(id TEXT PRIMARY KEY, embedding float[2] distance_metric=cosine, +text TEXT, +metadata TEXT); INSERT INTO vec_direct(id, embedding, text, metadata) VALUES ('doc-a', vec_f32('[1.0,0.0]'), 'alpha', '{\"tenant\":\"a\"}'); SELECT id, distance FROM vec_direct WHERE embedding MATCH vec_f32('[1.0,0.0]') ORDER BY distance LIMIT 1;"
-}
-```
-
-Tables created directly this way are not registered in `__vector_collections`, so the vector convenience tools will not manage them unless you also maintain compatible registry metadata.
+Advanced users can also query collection tables directly with sqlite-vec functions through `execute_sql`, but normal MCP clients should use `search_text` so embeddings stay inside the service.
 
 ### Minimal MCP Workflow
 
-For raw JSON-RPC clients, each vector operation is called with `tools/call`. The `arguments` object is the tool input shown above.
+For raw JSON-RPC clients, each text collection operation is called with `tools/call`. The `arguments` object is the tool input shown above.
 
 Create a collection:
 
@@ -520,8 +512,8 @@ Create a collection:
   "id": 10,
   "method": "tools/call",
   "params": {
-    "name": "create_vector_collection",
-    "arguments": {"collection": "docs", "dimension": 2}
+    "name": "create_text_collection",
+    "arguments": {"collection": "docs"}
   }
 }
 ```
@@ -534,13 +526,12 @@ Upsert and search:
   "id": 11,
   "method": "tools/call",
   "params": {
-    "name": "upsert_vectors",
+    "name": "upsert_texts",
     "arguments": {
       "collection": "docs",
       "items": [
         {
           "id": "doc-a",
-          "vector": [1.0, 0.0],
           "text": "alpha",
           "metadata": {"tenant": "a"}
         }
@@ -556,10 +547,10 @@ Upsert and search:
   "id": 12,
   "method": "tools/call",
   "params": {
-    "name": "search_vectors",
+    "name": "search_text",
     "arguments": {
       "collection": "docs",
-      "vector": [1.0, 0.0],
+      "query": "alpha",
       "top_k": 1,
       "filter": {"tenant": "a"}
     }
@@ -580,7 +571,7 @@ SELECT * FROM users LIMIT 10;
 PRAGMA table_info(users);
 ```
 
-`search_vectors` is also allowed in readonly mode.
+`search_text` is also allowed in readonly mode.
 
 Rejected examples:
 
@@ -590,7 +581,7 @@ CREATE TABLE t(id INTEGER);
 PRAGMA user_version = 1;
 ```
 
-`create_vector_collection`, `upsert_vectors`, `delete_vectors`, and `drop_vector_collection` are rejected in readonly mode.
+`create_text_collection`, `upsert_texts`, `delete_texts`, and `drop_text_collection` are rejected in readonly mode.
 
 ### readwrite
 
