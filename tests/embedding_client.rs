@@ -55,9 +55,7 @@ async fn embedding_client_rejects_malformed_json() {
         TEST_EMBEDDINGS_ROUTE,
         post(|| async { (StatusCode::OK, "not-json") }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {
@@ -118,9 +116,7 @@ async fn embedding_client_reports_non_success_status_with_body_excerpt() {
         TEST_EMBEDDINGS_ROUTE,
         post(|| async { (StatusCode::UNAUTHORIZED, "invalid api key") }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {

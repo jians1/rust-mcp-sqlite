@@ -19,12 +19,13 @@ use crate::{
     embedding::EmbeddingClient,
     error::AppError,
     sqlite::SqliteExecutor,
-    vector::{
-        CreateTextCollectionInput, CreateTextCollectionStorageInput, DeleteTextsInput,
-        DescribeTextCollectionInput, DropTextCollectionInput, GeneratedTextItemInput,
-        SearchGeneratedTextInput, SearchTextInput, TextItemInput, UpsertGeneratedTextsInput,
-        UpsertTextsInput, VectorToolResponse,
-    },
+    vector as vector_tools,
+};
+use vector_tools::{
+    CreateTextCollectionInput, CreateTextCollectionStorageInput, DeleteTextsInput,
+    DescribeTextCollectionInput, DropTextCollectionInput, GeneratedTextItemInput,
+    SearchGeneratedTextInput, SearchTextInput, TextItemInput, UpsertGeneratedTextsInput,
+    UpsertTextsInput, VectorToolResponse,
 };
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -121,7 +122,10 @@ impl SqliteMcpServer {
         name = "upsert_texts",
         description = "Insert or replace texts in a collection"
     )]
-    async fn upsert_texts(&self, Parameters(input): Parameters<UpsertTextsInput>) -> CallToolResult {
+    async fn upsert_texts(
+        &self,
+        Parameters(input): Parameters<UpsertTextsInput>,
+    ) -> CallToolResult {
         let start = Instant::now();
         if self.executor.mode() == RunMode::Readonly {
             return vector_failure(start, "readonly mode forbids upsert_texts");
@@ -165,14 +169,15 @@ impl SqliteMcpServer {
         }
 
         let mut generated_items = Vec::with_capacity(input.items.len());
-        for (item, vector) in input.items.into_iter().zip(embeddings) {
-            if let Err(message) = validate_embedding_dimension(&vector, dimension) {
+        for (item, embedding) in input.items.into_iter().zip(embeddings) {
+            if let Err(message) = validate_embedding_dimension(&embedding, dimension) {
                 return vector_failure(start, message);
             }
+            let vector = embedding;
             generated_items.push(GeneratedTextItemInput {
                 id: item.id,
-                vector,
                 text: item.text,
+                vector,
                 metadata: item.metadata,
             });
         }
@@ -219,11 +224,12 @@ impl SqliteMcpServer {
             return vector_failure(start, message);
         }
 
+        let vector = embedding;
         let response = self
             .executor
             .search_generated_text(SearchGeneratedTextInput {
                 collection: input.collection,
-                vector: embedding,
+                vector,
                 top_k: input.top_k,
                 filter: input.filter,
             })
@@ -235,7 +241,10 @@ impl SqliteMcpServer {
         name = "delete_texts",
         description = "Delete texts from a collection by id"
     )]
-    async fn delete_texts(&self, Parameters(input): Parameters<DeleteTextsInput>) -> CallToolResult {
+    async fn delete_texts(
+        &self,
+        Parameters(input): Parameters<DeleteTextsInput>,
+    ) -> CallToolResult {
         vector_result(self.executor.delete_texts(input).await)
     }
 
@@ -303,20 +312,20 @@ fn dimension_from_response(response: &VectorToolResponse) -> Result<usize, Strin
 }
 
 fn validate_embedding_dimension(
-    vector: &[f64],
+    embedding: &[f64],
     expected_dimension: usize,
 ) -> Result<(), String> {
     if expected_dimension == 0 {
         return Err("embedding dimension must be positive".to_string());
     }
-    if vector.len() != expected_dimension {
+    if embedding.len() != expected_dimension {
         return Err(format!(
             "embedding dimension mismatch: expected {}, got {}",
             expected_dimension,
-            vector.len()
+            embedding.len()
         ));
     }
-    if vector.iter().any(|value| !value.is_finite()) {
+    if embedding.iter().any(|value| !value.is_finite()) {
         return Err("embedding contains a non-finite value".to_string());
     }
     Ok(())

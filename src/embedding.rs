@@ -107,11 +107,7 @@ impl EmbeddingClient {
             ));
         }
 
-        Ok(parsed
-            .data
-            .into_iter()
-            .map(|item| item.embedding)
-            .collect())
+        Ok(parsed.data.into_iter().map(|item| item.embedding).collect())
     }
 }
 

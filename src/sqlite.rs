@@ -25,12 +25,9 @@ use crate::{
     },
     sql_classify::{StatementKind, classify, is_forbidden_in_mode, public_statement_type},
     vector::{
-        CreateTextCollectionStorageInput, CreateVectorCollectionInput, DeleteTextsInput,
-        DeleteVectorsInput, DescribeTextCollectionInput, DropTextCollectionInput,
-        DropVectorCollectionInput, SearchGeneratedTextInput, SearchVectorsInput,
-        UpsertGeneratedTextsInput, UpsertVectorsInput, VectorOperation, VectorToolResponse,
-        create_text_storage_input, execute_vector_operation, search_generated_text_input,
-        upsert_generated_texts_input,
+        CreateTextCollectionStorageInput, DeleteTextsInput, DescribeTextCollectionInput,
+        DropTextCollectionInput, SearchGeneratedTextInput, UpsertGeneratedTextsInput,
+        VectorOperation, VectorToolResponse, execute_vector_operation,
     },
 };
 
@@ -108,10 +105,7 @@ impl SqliteExecutor {
                 }
             })?;
 
-        Ok(Self {
-            tx,
-            mode,
-        })
+        Ok(Self { tx, mode })
     }
 
     pub fn mode(&self) -> RunMode {
@@ -140,37 +134,6 @@ impl SqliteExecutor {
         })
     }
 
-    pub async fn create_vector_collection(
-        &self,
-        input: CreateVectorCollectionInput,
-    ) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::CreateCollection(input))
-            .await
-    }
-
-    pub async fn upsert_vectors(&self, input: UpsertVectorsInput) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::UpsertVectors(input))
-            .await
-    }
-
-    pub async fn search_vectors(&self, input: SearchVectorsInput) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::SearchVectors(input))
-            .await
-    }
-
-    pub async fn delete_vectors(&self, input: DeleteVectorsInput) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::DeleteVectors(input))
-            .await
-    }
-
-    pub async fn drop_vector_collection(
-        &self,
-        input: DropVectorCollectionInput,
-    ) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::DropCollection(input))
-            .await
-    }
-
     pub async fn describe_text_collection(
         &self,
         input: DescribeTextCollectionInput,
@@ -183,41 +146,34 @@ impl SqliteExecutor {
         &self,
         input: CreateTextCollectionStorageInput,
     ) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::CreateCollection(
-            create_text_storage_input(input),
-        ))
-        .await
+        self.execute_vector(VectorOperation::CreateCollection(input))
+            .await
     }
 
-    pub async fn upsert_generated_texts(&self, input: UpsertGeneratedTextsInput) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::UpsertVectors(upsert_generated_texts_input(
-            input,
-        )))
-        .await
+    pub async fn upsert_generated_texts(
+        &self,
+        input: UpsertGeneratedTextsInput,
+    ) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::UpsertGeneratedTexts(input))
+            .await
     }
 
-    pub async fn search_generated_text(&self, input: SearchGeneratedTextInput) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::SearchVectors(search_generated_text_input(
-            input,
-        )))
-        .await
+    pub async fn search_generated_text(
+        &self,
+        input: SearchGeneratedTextInput,
+    ) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::SearchGeneratedText(input))
+            .await
     }
 
     pub async fn delete_texts(&self, input: DeleteTextsInput) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::DeleteVectors(DeleteVectorsInput {
-            collection: input.collection,
-            ids: input.ids,
-        }))
-        .await
+        self.execute_vector(VectorOperation::DeleteTexts(input))
+            .await
     }
 
     pub async fn drop_text_collection(&self, input: DropTextCollectionInput) -> VectorToolResponse {
-        self.execute_vector(VectorOperation::DropCollection(
-            DropVectorCollectionInput {
-                collection: input.collection,
-            },
-        ))
-        .await
+        self.execute_vector(VectorOperation::DropTextCollection(input))
+            .await
     }
 
     async fn execute_vector(&self, operation: VectorOperation) -> VectorToolResponse {
@@ -526,7 +482,14 @@ fn register_sqlite_vec() {
     static REGISTER: Once = Once::new();
 
     REGISTER.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+        type SqliteAutoExtension = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::ffi::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::ffi::c_int;
+        let extension =
+            std::mem::transmute::<*const (), SqliteAutoExtension>(sqlite3_vec_init as *const ());
+        sqlite3_auto_extension(Some(extension));
     });
 }
 

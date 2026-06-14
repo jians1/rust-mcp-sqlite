@@ -12,50 +12,11 @@ const DISTANCE_METRIC: &str = "cosine";
 #[derive(Clone, Debug)]
 pub enum VectorOperation {
     DescribeCollection(DescribeTextCollectionInput),
-    CreateCollection(CreateVectorCollectionInput),
-    UpsertVectors(UpsertVectorsInput),
-    SearchVectors(SearchVectorsInput),
-    DeleteVectors(DeleteVectorsInput),
-    DropCollection(DropVectorCollectionInput),
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
-pub struct CreateVectorCollectionInput {
-    pub collection: String,
-    pub dimension: usize,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
-pub struct UpsertVectorsInput {
-    pub collection: String,
-    pub items: Vec<VectorItemInput>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
-pub struct VectorItemInput {
-    pub id: String,
-    pub vector: Vec<f64>,
-    pub text: Option<String>,
-    pub metadata: Option<Value>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
-pub struct SearchVectorsInput {
-    pub collection: String,
-    pub vector: Vec<f64>,
-    pub top_k: usize,
-    pub filter: Option<Value>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
-pub struct DeleteVectorsInput {
-    pub collection: String,
-    pub ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
-pub struct DropVectorCollectionInput {
-    pub collection: String,
+    CreateCollection(CreateTextCollectionStorageInput),
+    UpsertGeneratedTexts(UpsertGeneratedTextsInput),
+    SearchGeneratedText(SearchGeneratedTextInput),
+    DeleteTexts(DeleteTextsInput),
+    DropTextCollection(DropTextCollectionInput),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
@@ -174,44 +135,12 @@ pub fn execute_vector_operation(
     match operation {
         VectorOperation::DescribeCollection(input) => describe_collection(conn, input),
         VectorOperation::CreateCollection(input) => create_collection(conn, mode, input),
-        VectorOperation::UpsertVectors(input) => upsert_vectors(conn, mode, input),
-        VectorOperation::SearchVectors(input) => search_vectors(conn, max_top_k, input),
-        VectorOperation::DeleteVectors(input) => delete_vectors(conn, mode, input),
-        VectorOperation::DropCollection(input) => drop_collection(conn, mode, input),
-    }
-}
-
-pub fn create_text_storage_input(
-    input: CreateTextCollectionStorageInput,
-) -> CreateVectorCollectionInput {
-    CreateVectorCollectionInput {
-        collection: input.collection,
-        dimension: input.dimension,
-    }
-}
-
-pub fn upsert_generated_texts_input(input: UpsertGeneratedTextsInput) -> UpsertVectorsInput {
-    UpsertVectorsInput {
-        collection: input.collection,
-        items: input
-            .items
-            .into_iter()
-            .map(|item| VectorItemInput {
-                id: item.id,
-                vector: item.vector,
-                text: Some(item.text),
-                metadata: item.metadata,
-            })
-            .collect(),
-    }
-}
-
-pub fn search_generated_text_input(input: SearchGeneratedTextInput) -> SearchVectorsInput {
-    SearchVectorsInput {
-        collection: input.collection,
-        vector: input.vector,
-        top_k: input.top_k,
-        filter: input.filter,
+        VectorOperation::UpsertGeneratedTexts(input) => upsert_generated_texts(conn, mode, input),
+        VectorOperation::SearchGeneratedText(input) => {
+            search_generated_text(conn, max_top_k, input)
+        }
+        VectorOperation::DeleteTexts(input) => delete_texts(conn, mode, input),
+        VectorOperation::DropTextCollection(input) => drop_text_collection(conn, mode, input),
     }
 }
 
@@ -237,7 +166,7 @@ fn describe_collection(
 fn create_collection(
     conn: &Connection,
     mode: RunMode,
-    input: CreateVectorCollectionInput,
+    input: CreateTextCollectionStorageInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
         return Err("readonly mode forbids create_text_collection".to_string());
@@ -287,10 +216,10 @@ fn create_collection(
     ))
 }
 
-fn upsert_vectors(
+fn upsert_generated_texts(
     conn: &Connection,
     mode: RunMode,
-    input: UpsertVectorsInput,
+    input: UpsertGeneratedTextsInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
         return Err("readonly mode forbids upsert_texts".to_string());
@@ -309,7 +238,7 @@ fn upsert_vectors(
 
     for item in &input.items {
         if item.id.is_empty() {
-            return Err("vector id must not be empty".to_string());
+            return Err("text id must not be empty".to_string());
         }
         let vector_json = vector_to_json(&item.vector, existing.dimension)?;
         let metadata_json = metadata_to_json(item.metadata.as_ref())?;
@@ -317,7 +246,7 @@ fn upsert_vectors(
             .map_err(|error| error.to_string())?;
         conn.execute(
             &sql,
-            params![item.id, vector_json, item.text, metadata_json],
+            params![item.id, vector_json, item.text.as_str(), metadata_json],
         )
         .map_err(|error| error.to_string())?;
     }
@@ -328,10 +257,10 @@ fn upsert_vectors(
     ]))
 }
 
-fn search_vectors(
+fn search_generated_text(
     conn: &Connection,
     max_top_k: usize,
-    input: SearchVectorsInput,
+    input: SearchGeneratedTextInput,
 ) -> Result<Map<String, Value>, String> {
     let collection = validate_collection_name(&input.collection)?;
     let existing = find_collection(conn, collection)?
@@ -345,7 +274,7 @@ fn search_vectors(
     let vector_json = vector_to_json(&input.vector, existing.dimension)?;
 
     if let Some(filter) = filter_to_map(input.filter.as_ref())? {
-        return search_vectors_filtered(
+        return search_generated_text_filtered(
             conn,
             collection,
             &existing.table_name,
@@ -388,7 +317,7 @@ fn search_vectors(
     ]))
 }
 
-fn search_vectors_filtered(
+fn search_generated_text_filtered(
     conn: &Connection,
     collection: &str,
     table_name: &str,
@@ -481,10 +410,10 @@ fn search_vectors_filtered(
     ]))
 }
 
-fn delete_vectors(
+fn delete_texts(
     conn: &Connection,
     mode: RunMode,
-    input: DeleteVectorsInput,
+    input: DeleteTextsInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
         return Err("readonly mode forbids delete_texts".to_string());
@@ -499,7 +428,7 @@ fn delete_vectors(
 
     for id in &input.ids {
         if id.is_empty() {
-            return Err("vector id must not be empty".to_string());
+            return Err("text id must not be empty".to_string());
         }
         deleted_count += conn
             .execute(&sql, params![id])
@@ -513,10 +442,10 @@ fn delete_vectors(
     ]))
 }
 
-fn drop_collection(
+fn drop_text_collection(
     conn: &Connection,
     mode: RunMode,
-    input: DropVectorCollectionInput,
+    input: DropTextCollectionInput,
 ) -> Result<Map<String, Value>, String> {
     if mode == RunMode::Readonly {
         return Err("readonly mode forbids drop_text_collection".to_string());

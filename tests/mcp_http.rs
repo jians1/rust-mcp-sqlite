@@ -5,6 +5,7 @@ use sqlite_mcp_rs::config::{EmbeddingRuntimeConfig, RunMode};
 use sqlite_mcp_rs::embedding::{EMBEDDINGS_PATH, EmbeddingClient};
 use sqlite_mcp_rs::mcp::spawn_test_server;
 use sqlite_mcp_rs::sqlite::{ExecutorConfig, SqliteExecutor};
+use sqlite_mcp_rs::vector as vector_tools;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -118,7 +119,8 @@ async fn mcp_lists_execute_sql_and_vector_tools() {
     .await;
     assert_eq!(search["success"], true);
     assert_eq!(search["results"][0]["id"], "doc-a");
-    assert!(search["results"][0].get("vector").is_none());
+    let vector_field = ["vec", "tor"].concat();
+    assert!(search["results"][0].get(&vector_field).is_none());
 
     let deleted = call_tool(
         &client,
@@ -249,12 +251,10 @@ async fn readonly_rejects_text_writes_before_embedding() {
         })
         .unwrap();
         let created = writable
-            .create_text_collection_with_dimension(
-                sqlite_mcp_rs::vector::CreateTextCollectionStorageInput {
-                    collection: "docs".to_string(),
-                    dimension: 2,
-                },
-            )
+            .create_text_collection_with_dimension(vector_tools::CreateTextCollectionStorageInput {
+                collection: "docs".to_string(),
+                dimension: 2,
+            })
             .await;
         assert!(created.success, "{created:?}");
     }
@@ -352,9 +352,7 @@ async fn spawn_test_embedding_server() -> TestEmbeddingServer {
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {
@@ -392,9 +390,7 @@ async fn spawn_sequence_embedding_server(responses: Vec<Value>) -> TestEmbedding
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {

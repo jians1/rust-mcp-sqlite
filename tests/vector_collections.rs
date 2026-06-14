@@ -693,8 +693,8 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
         .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
             collection: "other".to_string(),
             dimension: 2,
-    })
-    .await;
+        })
+        .await;
     assert!(!create.success, "{create:?}");
     assert!(vector_error_message(&create).contains("create_text_collection"));
 
@@ -707,8 +707,8 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
                 text: "text".to_string(),
                 metadata: None,
             }],
-    })
-    .await;
+        })
+        .await;
     assert!(!upsert.success, "{upsert:?}");
     assert!(vector_error_message(&upsert).contains("upsert_texts"));
 
@@ -716,16 +716,16 @@ async fn readonly_allows_search_and_rejects_vector_writes() {
         .delete_texts(DeleteTextsInput {
             collection: "docs".to_string(),
             ids: vec!["doc-a".to_string()],
-    })
-    .await;
+        })
+        .await;
     assert!(!delete.success, "{delete:?}");
     assert!(vector_error_message(&delete).contains("delete_texts"));
 
     let drop = readonly
         .drop_text_collection(DropTextCollectionInput {
             collection: "docs".to_string(),
-    })
-    .await;
+        })
+        .await;
     assert!(!drop.success, "{drop:?}");
     assert!(vector_error_message(&drop).contains("drop_text_collection"));
 }
