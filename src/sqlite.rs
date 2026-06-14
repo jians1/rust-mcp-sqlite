@@ -26,8 +26,8 @@ use crate::{
     sql_classify::{StatementKind, classify, is_forbidden_in_mode, public_statement_type},
     vector::{
         CreateTextCollectionStorageInput, DeleteTextsInput, DescribeTextCollectionInput,
-        DropTextCollectionInput, SearchGeneratedTextInput, UpsertGeneratedTextsInput,
-        VectorOperation, VectorToolResponse, execute_vector_operation,
+        DropTextCollectionInput, SearchGeneratedHybridTextInput, SearchGeneratedTextInput,
+        UpsertGeneratedTextsInput, VectorOperation, VectorToolResponse, execute_vector_operation,
     },
 };
 
@@ -163,6 +163,14 @@ impl SqliteExecutor {
         input: SearchGeneratedTextInput,
     ) -> VectorToolResponse {
         self.execute_vector(VectorOperation::SearchGeneratedText(input))
+            .await
+    }
+
+    pub async fn search_generated_text_hybrid(
+        &self,
+        input: SearchGeneratedHybridTextInput,
+    ) -> VectorToolResponse {
+        self.execute_vector(VectorOperation::SearchGeneratedTextHybrid(input))
             .await
     }
 

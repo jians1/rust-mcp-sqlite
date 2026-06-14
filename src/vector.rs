@@ -15,6 +15,7 @@ pub enum VectorOperation {
     CreateCollection(CreateTextCollectionStorageInput),
     UpsertGeneratedTexts(UpsertGeneratedTextsInput),
     SearchGeneratedText(SearchGeneratedTextInput),
+    SearchGeneratedTextHybrid(SearchGeneratedHybridTextInput),
     DeleteTexts(DeleteTextsInput),
     DropTextCollection(DropTextCollectionInput),
 }
@@ -89,6 +90,18 @@ pub struct SearchGeneratedTextInput {
     pub filter: Option<Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
+pub struct SearchGeneratedHybridTextInput {
+    pub collection: String,
+    pub vector: Vec<f64>,
+    pub top_k: usize,
+    pub filter: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fts_query: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct VectorToolResponse {
     pub success: bool,
@@ -138,6 +151,9 @@ pub fn execute_vector_operation(
         VectorOperation::UpsertGeneratedTexts(input) => upsert_generated_texts(conn, mode, input),
         VectorOperation::SearchGeneratedText(input) => {
             search_generated_text(conn, max_top_k, input)
+        }
+        VectorOperation::SearchGeneratedTextHybrid(input) => {
+            search_generated_text_hybrid(conn, max_top_k, input)
         }
         VectorOperation::DeleteTexts(input) => delete_texts(conn, mode, input),
         VectorOperation::DropTextCollection(input) => drop_text_collection(conn, mode, input),
@@ -348,48 +364,7 @@ fn search_generated_text_filtered(
     let mut clauses = Vec::new();
     let mut values: Vec<Box<dyn ToSql>> = vec![Box::new(vector_json)];
 
-    for (key, value) in filter {
-        validate_filter_key(key)?;
-        let path = format!("$.{key}");
-        match value {
-            Value::String(value) => {
-                clauses.push(format!(
-                    "json_type(metadata, '{path}') = 'text' AND json_extract(metadata, '{path}') = ?"
-                ));
-                values.push(Box::new(value.clone()));
-            }
-            Value::Number(value) => {
-                if let Some(value) = value.as_i64() {
-                    clauses.push(format!(
-                        "json_type(metadata, '{path}') = 'integer' AND json_extract(metadata, '{path}') = ?"
-                    ));
-                    values.push(Box::new(value));
-                } else if let Some(value) = value.as_u64() {
-                    let value = i64::try_from(value)
-                        .map_err(|_| "filter integer is too large".to_string())?;
-                    clauses.push(format!(
-                        "json_type(metadata, '{path}') = 'integer' AND json_extract(metadata, '{path}') = ?"
-                    ));
-                    values.push(Box::new(value));
-                } else if let Some(value) = value.as_f64() {
-                    clauses.push(format!(
-                        "json_type(metadata, '{path}') = 'real' AND json_extract(metadata, '{path}') = ?"
-                    ));
-                    values.push(Box::new(value));
-                }
-            }
-            Value::Bool(value) => {
-                let json_type = if *value { "true" } else { "false" };
-                clauses.push(format!("json_type(metadata, '{path}') = '{json_type}'"));
-            }
-            Value::Null => {
-                clauses.push(format!("json_type(metadata, '{path}') = 'null'"));
-            }
-            Value::Array(_) | Value::Object(_) => {
-                return Err("filter values must be scalar JSON values".to_string());
-            }
-        }
-    }
+    append_metadata_filter_clauses(filter, &mut clauses, &mut values)?;
 
     values.push(Box::new(top_k as i64));
     let where_clause = if clauses.is_empty() {
@@ -404,6 +379,104 @@ fn search_generated_text_filtered(
          ORDER BY distance
          LIMIT ?"
     );
+    let params = params_from_iter(values.iter().map(|value| value.as_ref() as &dyn ToSql));
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params, |row| {
+            let metadata_text: Option<String> = row.get(3)?;
+            let metadata = parse_metadata_text(metadata_text.as_deref());
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "distance": row.get::<_, f64>(1)?,
+                "text": row.get::<_, Option<String>>(2)?,
+                "metadata": metadata,
+            }))
+        })
+        .map_err(|error| error.to_string())?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row.map_err(|error| error.to_string())?);
+    }
+
+    Ok(Map::from_iter([
+        ("collection".to_string(), json!(collection)),
+        ("results".to_string(), Value::Array(results)),
+    ]))
+}
+
+fn search_generated_text_hybrid(
+    conn: &Connection,
+    max_top_k: usize,
+    input: SearchGeneratedHybridTextInput,
+) -> Result<Map<String, Value>, String> {
+    let collection = validate_collection_name(&input.collection)?;
+    let existing = find_collection(conn, collection)?
+        .ok_or_else(|| format!("collection not found: {collection}"))?;
+    if input.top_k == 0 {
+        return Err("top_k must be positive".to_string());
+    }
+    if input.top_k > max_top_k {
+        return Err(format!("top_k must not exceed max_top_k ({max_top_k})"));
+    }
+
+    let vector_json = vector_to_json(&input.vector, existing.dimension)?;
+    let fts_table = fts_table_name(collection);
+    let tags_table = tags_table_name(collection);
+
+    let mut clauses = Vec::new();
+    let mut values: Vec<Box<dyn ToSql>> = vec![Box::new(vector_json)];
+
+    if let Some(filter) = filter_to_map(input.filter.as_ref())? {
+        append_metadata_filter_clauses(filter, &mut clauses, &mut values)?;
+    }
+
+    let mut candidate_subqueries = Vec::new();
+    if let Some(fts_query) = input.fts_query.as_deref().map(str::trim)
+        && !fts_query.is_empty()
+    {
+        candidate_subqueries.push(format!(
+            "SELECT id FROM {fts_table} WHERE {fts_table} MATCH ?"
+        ));
+        values.push(Box::new(fts_match_query(fts_query)?));
+    }
+
+    let mut normalized_tags = Vec::new();
+    for tag in input.tags {
+        let tag = validate_tag(&tag)?.to_string();
+        if !normalized_tags
+            .iter()
+            .any(|existing: &String| existing == &tag)
+        {
+            normalized_tags.push(tag);
+        }
+    }
+    for tag in normalized_tags {
+        candidate_subqueries.push(format!("SELECT item_id FROM {tags_table} WHERE tag = ?"));
+        values.push(Box::new(tag));
+    }
+    if !candidate_subqueries.is_empty() {
+        clauses.push(format!(
+            "id IN ({})",
+            candidate_subqueries.join(" INTERSECT ")
+        ));
+    }
+
+    values.push(Box::new(input.top_k as i64));
+    let where_clause = if clauses.is_empty() {
+        "1".to_string()
+    } else {
+        clauses.join(" AND ")
+    };
+    let sql = format!(
+        "SELECT id, vec_distance_cosine(embedding, vec_f32(?)) AS distance, text, metadata
+         FROM {}
+         WHERE {where_clause}
+         ORDER BY distance
+         LIMIT ?",
+        existing.table_name
+    );
+
     let params = params_from_iter(values.iter().map(|value| value.as_ref() as &dyn ToSql));
     let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = statement
@@ -607,6 +680,84 @@ fn validate_filter_key(key: &str) -> Result<(), String> {
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     {
         return Err("filter keys must contain only letters, digits, and underscores".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_tag(tag: &str) -> Result<&str, String> {
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return Err("tags must not contain empty strings".to_string());
+    }
+    Ok(tag)
+}
+
+fn fts_match_query(input: &str) -> Result<String, String> {
+    let terms = input
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(quote_fts_term)
+        .collect::<Vec<_>>();
+
+    if terms.is_empty() {
+        return Err("fts_query must not be empty".to_string());
+    }
+
+    Ok(terms.join(" AND "))
+}
+
+fn quote_fts_term(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
+}
+
+fn append_metadata_filter_clauses(
+    filter: &Map<String, Value>,
+    clauses: &mut Vec<String>,
+    values: &mut Vec<Box<dyn ToSql>>,
+) -> Result<(), String> {
+    for (key, value) in filter {
+        validate_filter_key(key)?;
+        let path = format!("$.{key}");
+        match value {
+            Value::String(value) => {
+                clauses.push(format!(
+                    "json_type(metadata, '{path}') = 'text' AND json_extract(metadata, '{path}') = ?"
+                ));
+                values.push(Box::new(value.clone()));
+            }
+            Value::Number(value) => {
+                if let Some(value) = value.as_i64() {
+                    clauses.push(format!(
+                        "json_type(metadata, '{path}') = 'integer' AND json_extract(metadata, '{path}') = ?"
+                    ));
+                    values.push(Box::new(value));
+                } else if let Some(value) = value.as_u64() {
+                    let value = i64::try_from(value)
+                        .map_err(|_| "filter integer is too large".to_string())?;
+                    clauses.push(format!(
+                        "json_type(metadata, '{path}') = 'integer' AND json_extract(metadata, '{path}') = ?"
+                    ));
+                    values.push(Box::new(value));
+                } else if let Some(value) = value.as_f64() {
+                    clauses.push(format!(
+                        "json_type(metadata, '{path}') = 'real' AND json_extract(metadata, '{path}') = ?"
+                    ));
+                    values.push(Box::new(value));
+                }
+            }
+            Value::Bool(value) => {
+                let json_type = if *value { "true" } else { "false" };
+                clauses.push(format!("json_type(metadata, '{path}') = '{json_type}'"));
+            }
+            Value::Null => {
+                clauses.push(format!("json_type(metadata, '{path}') = 'null'"));
+            }
+            Value::Array(_) | Value::Object(_) => {
+                return Err("filter values must be scalar JSON values".to_string());
+            }
+        }
     }
 
     Ok(())

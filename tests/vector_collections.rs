@@ -4,7 +4,8 @@ use sqlite_mcp_rs::response::StatementResult;
 use sqlite_mcp_rs::sqlite::{ExecutorConfig, SqliteExecutor};
 use sqlite_mcp_rs::vector::{
     CreateTextCollectionStorageInput, DeleteTextsInput, DropTextCollectionInput,
-    GeneratedTextItemInput, SearchGeneratedTextInput, UpsertGeneratedTextsInput,
+    GeneratedTextItemInput, SearchGeneratedHybridTextInput, SearchGeneratedTextInput,
+    UpsertGeneratedTextsInput,
 };
 
 fn temp_db_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -639,6 +640,79 @@ async fn search_generated_text_filters_metadata() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["id"], json!("doc-match"));
     assert_eq!(results[0]["metadata"], json!({"tenant": "a", "rank": 2}));
+}
+
+#[tokio::test]
+async fn search_generated_text_hybrid_filters_fts_tags_and_metadata_then_sorts_by_vector() {
+    let (_dir, path) = temp_db_path("hybrid_search.db");
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
+
+    let create = exec
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
+            collection: "docs".to_string(),
+            dimension: 4,
+        })
+        .await;
+    assert!(create.success, "{create:?}");
+
+    let upsert = exec
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
+            collection: "docs".to_string(),
+            items: vec![
+                GeneratedTextItemInput {
+                    id: "a1".to_string(),
+                    vector: vec![0.98, 0.02, 0.04, 0.10],
+                    text: "她没有拔剑，只是抬眼看过去，殿中喧哗便像被霜压住。".to_string(),
+                    metadata: Some(json!({
+                        "tenant": "novel",
+                        "dimension": "高潮燃点",
+                        "score": 9,
+                        "tags": ["女主", "克制", "压迫感"]
+                    })),
+                },
+                GeneratedTextItemInput {
+                    id: "a2".to_string(),
+                    vector: vec![0.90, 0.05, 0.02, 0.02],
+                    text: "他站在雨里，眉眼淡得像旧雪，偏让人不敢靠近。".to_string(),
+                    metadata: Some(json!({
+                        "tenant": "novel",
+                        "dimension": "人物塑造",
+                        "score": 9,
+                        "tags": ["男主", "克制", "压迫感"]
+                    })),
+                },
+                GeneratedTextItemInput {
+                    id: "a3".to_string(),
+                    vector: vec![0.04, 0.97, 0.01, 0.02],
+                    text: "她把杯子往前一推，笑说这次轮到你认输。".to_string(),
+                    metadata: Some(json!({
+                        "tenant": "novel",
+                        "dimension": "日常互动",
+                        "score": 8,
+                        "tags": ["女主", "轻松"]
+                    })),
+                },
+            ],
+        })
+        .await;
+    assert!(upsert.success, "{upsert:?}");
+
+    let search = exec
+        .search_generated_text_hybrid(SearchGeneratedHybridTextInput {
+            collection: "docs".to_string(),
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+            top_k: 5,
+            filter: Some(json!({"tenant": "novel"})),
+            fts_query: Some("殿中喧哗".to_string()),
+            tags: vec!["女主".to_string(), "克制".to_string()],
+        })
+        .await;
+
+    assert!(search.success, "{search:?}");
+    let results = search.data["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], json!("a1"));
+    assert_eq!(results[0]["metadata"]["dimension"], json!("高潮燃点"));
 }
 
 #[tokio::test]
