@@ -1,4 +1,4 @@
-use std::{net::IpAddr, path::PathBuf};
+use std::{env, net::IpAddr, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 
@@ -27,6 +27,16 @@ pub struct Cli {
     pub max_top_k: usize,
     #[arg(long, default_value_t = 10_000)]
     pub timeout_ms: u64,
+    #[arg(long, default_value = "https://api.openai.com/v1")]
+    pub embedding_base_url: String,
+    #[arg(long)]
+    pub embedding_api_key: Option<String>,
+    #[arg(long)]
+    pub embedding_model: Option<String>,
+    #[arg(long)]
+    pub embedding_dimensions: Option<usize>,
+    #[arg(long, default_value_t = 30_000)]
+    pub embedding_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,10 +49,24 @@ pub struct RuntimeConfig {
     pub max_rows: usize,
     pub max_top_k: usize,
     pub timeout_ms: u64,
+    pub embedding: EmbeddingRuntimeConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmbeddingRuntimeConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub dimensions: Option<usize>,
+    pub timeout_ms: u64,
 }
 
 impl From<Cli> for RuntimeConfig {
     fn from(cli: Cli) -> Self {
+        let embedding_api_key = cli
+            .embedding_api_key
+            .or_else(|| env::var("OPENAI_API_KEY").ok());
+
         Self {
             db: cli.db,
             host: cli.host,
@@ -52,6 +76,13 @@ impl From<Cli> for RuntimeConfig {
             max_rows: cli.max_rows,
             max_top_k: cli.max_top_k,
             timeout_ms: cli.timeout_ms,
+            embedding: EmbeddingRuntimeConfig {
+                base_url: cli.embedding_base_url,
+                api_key: embedding_api_key,
+                model: cli.embedding_model,
+                dimensions: cli.embedding_dimensions,
+                timeout_ms: cli.embedding_timeout_ms,
+            },
         }
     }
 }

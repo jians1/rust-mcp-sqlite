@@ -19,6 +19,11 @@ fn cli_defaults_match_spec() {
     assert_eq!(cli.max_rows, 500);
     assert_eq!(cli.max_top_k, 100);
     assert_eq!(cli.timeout_ms, 10_000);
+    assert_eq!(cli.embedding_base_url, "https://api.openai.com/v1");
+    assert_eq!(cli.embedding_api_key, None);
+    assert_eq!(cli.embedding_model, None);
+    assert_eq!(cli.embedding_dimensions, None);
+    assert_eq!(cli.embedding_timeout_ms, 30_000);
 }
 
 #[test]
@@ -41,6 +46,16 @@ fn cli_accepts_readonly_and_overrides() {
         "7",
         "--timeout-ms",
         "1500",
+        "--embedding-base-url",
+        "http://127.0.0.1:8080/v1",
+        "--embedding-api-key",
+        "embedding-secret",
+        "--embedding-model",
+        "text-embedding-3-small",
+        "--embedding-dimensions",
+        "512",
+        "--embedding-timeout-ms",
+        "2500",
     ]);
 
     assert_eq!(cli.host.to_string(), "0.0.0.0");
@@ -50,6 +65,40 @@ fn cli_accepts_readonly_and_overrides() {
     assert_eq!(cli.max_rows, 25);
     assert_eq!(cli.max_top_k, 7);
     assert_eq!(cli.timeout_ms, 1500);
+    assert_eq!(cli.embedding_base_url, "http://127.0.0.1:8080/v1");
+    assert_eq!(cli.embedding_api_key.as_deref(), Some("embedding-secret"));
+    assert_eq!(
+        cli.embedding_model.as_deref(),
+        Some("text-embedding-3-small")
+    );
+    assert_eq!(cli.embedding_dimensions, Some(512));
+    assert_eq!(cli.embedding_timeout_ms, 2500);
+}
+
+#[test]
+fn runtime_config_reads_openai_api_key_when_embedding_api_key_is_absent() {
+    let original = std::env::var("OPENAI_API_KEY").ok();
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "env-secret");
+    }
+
+    let cli = Cli::parse_from([
+        "sqlite-mcp-rs",
+        "--db",
+        "/tmp/app.db",
+        "--embedding-model",
+        "text-embedding-3-small",
+    ]);
+    let config = sqlite_mcp_rs::config::RuntimeConfig::from(cli);
+
+    assert_eq!(config.embedding.api_key.as_deref(), Some("env-secret"));
+
+    unsafe {
+        match original {
+            Some(value) => std::env::set_var("OPENAI_API_KEY", value),
+            None => std::env::remove_var("OPENAI_API_KEY"),
+        }
+    }
 }
 
 #[test]
@@ -71,7 +120,12 @@ fn binary_help_mentions_expected_flags() {
         .stdout(predicates::str::contains("--auth-token"))
         .stdout(predicates::str::contains("--max-rows"))
         .stdout(predicates::str::contains("--max-top-k"))
-        .stdout(predicates::str::contains("--timeout-ms"));
+        .stdout(predicates::str::contains("--timeout-ms"))
+        .stdout(predicates::str::contains("--embedding-base-url"))
+        .stdout(predicates::str::contains("--embedding-api-key"))
+        .stdout(predicates::str::contains("--embedding-model"))
+        .stdout(predicates::str::contains("--embedding-dimensions"))
+        .stdout(predicates::str::contains("--embedding-timeout-ms"));
 }
 
 #[test]
