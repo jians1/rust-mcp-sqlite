@@ -445,14 +445,12 @@ fn search_generated_text_hybrid(
 
     let mut candidate_subqueries = Vec::new();
     if let Some(fts_query) = input.fts_query.as_deref() {
-        let fts_query = fts_query.trim();
-        if fts_query.is_empty() {
-            return Err("fts_query must not be empty".to_string());
-        }
-        candidate_subqueries.push(format!(
-            "SELECT id FROM {fts_table} WHERE {fts_table} MATCH ?"
-        ));
-        values.push(Box::new(fts_match_query(fts_query)?));
+        append_fts_candidate_subquery(
+            &fts_table,
+            fts_query,
+            &mut candidate_subqueries,
+            &mut values,
+        )?;
     }
 
     let mut normalized_tags = Vec::new();
@@ -722,8 +720,57 @@ fn fts_match_query(input: &str) -> Result<String, String> {
     Ok(terms.join(" AND "))
 }
 
+fn append_fts_candidate_subquery(
+    fts_table: &str,
+    input: &str,
+    candidate_subqueries: &mut Vec<String>,
+    values: &mut Vec<Box<dyn ToSql>>,
+) -> Result<(), String> {
+    let terms = input
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+
+    if terms.is_empty() {
+        return Err("fts_query must not be empty".to_string());
+    }
+
+    let mut match_terms = Vec::new();
+    let mut like_terms = Vec::new();
+    for term in terms {
+        if term.chars().count() >= 3 {
+            match_terms.push(term);
+        } else {
+            like_terms.push(term);
+        }
+    }
+
+    let mut clauses = Vec::new();
+    if !match_terms.is_empty() {
+        clauses.push(format!("{fts_table} MATCH ?"));
+        values.push(Box::new(fts_match_query(&match_terms.join(" "))?));
+    }
+    for term in like_terms {
+        clauses.push("text LIKE '%' || ? || '%' ESCAPE '\\'".to_string());
+        values.push(Box::new(escape_like_term(term)));
+    }
+
+    candidate_subqueries.push(format!(
+        "SELECT id FROM {fts_table} WHERE {}",
+        clauses.join(" AND ")
+    ));
+    Ok(())
+}
+
 fn quote_fts_term(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
+}
+
+fn escape_like_term(term: &str) -> String {
+    term.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn append_metadata_filter_clauses(

@@ -497,7 +497,7 @@ sqlite-mcp-rs \
 }
 ```
 
-服务器会在内部嵌入 `query`，先应用可选的顶层 metadata 过滤、可选的 FTS5 trigram 文本匹配、可选的标签过滤，然后对剩余候选按余弦距离排序。`fts_query` 会被当作普通文本处理，按空白分词，为 FTS5 加引号，并用 `AND` 组合。FTS5 trigram 适合中文短语和子串匹配，但非常短的查询更适合表达为 tag 或 metadata 过滤。
+服务器会在内部嵌入 `query`，先应用可选的顶层 metadata 过滤、可选的 FTS5 trigram 文本匹配、可选的标签过滤，然后对剩余候选按余弦距离排序。`fts_query` 会被当作普通文本处理，按空白分词，并用 `AND` 组合。三个及以上字符的词会使用加引号的 FTS5 trigram `MATCH`；更短的词会退回到对 FTS sidecar 文本的 `LIKE` 扫描，所以 `纸灯` 这类常见中文双字短语也能命中。
 
 `tags` 要求每个列出的标签都存在于 `metadata.tags` 中。混合搜索返回与 `search_text` 相同的结果结构。
 

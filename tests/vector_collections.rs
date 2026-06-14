@@ -770,6 +770,52 @@ async fn search_generated_text_hybrid_filters_fts_tags_and_metadata_then_sorts_b
 }
 
 #[tokio::test]
+async fn search_generated_text_hybrid_matches_short_chinese_fts_terms() {
+    let (_dir, path) = temp_db_path("hybrid_short_fts.db");
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
+
+    let create = exec
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
+            collection: "docs".to_string(),
+            dimension: 2,
+        })
+        .await;
+    assert!(create.success, "{create:?}");
+
+    let upsert = exec
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
+            collection: "docs".to_string(),
+            items: vec![GeneratedTextItemInput {
+                id: "paper-lamp".to_string(),
+                vector: vec![1.0, 0.0],
+                text: "那盏纸灯从来不是信物，而是他留给自己的退路。".to_string(),
+                metadata: Some(json!({
+                    "tenant": "novel",
+                    "tags": ["伏笔", "回收"]
+                })),
+            }],
+        })
+        .await;
+    assert!(upsert.success, "{upsert:?}");
+
+    let search = exec
+        .search_generated_text_hybrid(SearchGeneratedHybridTextInput {
+            collection: "docs".to_string(),
+            vector: vec![1.0, 0.0],
+            top_k: 5,
+            filter: Some(json!({"tenant": "novel"})),
+            fts_query: Some("纸灯".to_string()),
+            tags: vec!["伏笔".to_string()],
+        })
+        .await;
+
+    assert!(search.success, "{search:?}");
+    let results = search.data["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], json!("paper-lamp"));
+}
+
+#[tokio::test]
 async fn delete_texts_reports_requested_and_deleted_counts() {
     let (_dir, path) = temp_db_path("delete_texts.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;

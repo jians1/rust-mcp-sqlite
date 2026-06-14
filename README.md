@@ -497,7 +497,7 @@ Example success body:
 }
 ```
 
-The server embeds `query` internally, applies optional top-level metadata filters, optional FTS5 trigram text matching, and optional tag filters, then ranks the remaining candidates by cosine distance. `fts_query` is treated as plain text, split on whitespace, quoted for FTS5, and combined with `AND`. FTS5 trigram is useful for Chinese phrase and substring matching, but very short queries may be better expressed as tags or metadata filters.
+The server embeds `query` internally, applies optional top-level metadata filters, optional FTS5 trigram text matching, and optional tag filters, then ranks the remaining candidates by cosine distance. `fts_query` is treated as plain text, split on whitespace, and combined with `AND`. Terms with three or more characters use quoted FTS5 trigram `MATCH`; shorter terms fall back to a `LIKE` scan over the FTS sidecar text so common two-character Chinese phrases such as `纸灯` can still match.
 
 `tags` require every listed tag to be present in `metadata.tags`. Hybrid search returns the same result shape as `search_text`.
 
