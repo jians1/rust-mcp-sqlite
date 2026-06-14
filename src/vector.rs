@@ -444,9 +444,11 @@ fn search_generated_text_hybrid(
     }
 
     let mut candidate_subqueries = Vec::new();
-    if let Some(fts_query) = input.fts_query.as_deref().map(str::trim)
-        && !fts_query.is_empty()
-    {
+    if let Some(fts_query) = input.fts_query.as_deref() {
+        let fts_query = fts_query.trim();
+        if fts_query.is_empty() {
+            return Err("fts_query must not be empty".to_string());
+        }
         candidate_subqueries.push(format!(
             "SELECT id FROM {fts_table} WHERE {fts_table} MATCH ?"
         ));

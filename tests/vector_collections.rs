@@ -593,6 +593,60 @@ async fn validation_rejects_invalid_inputs() {
 }
 
 #[tokio::test]
+async fn hybrid_search_rejects_invalid_tags_and_metadata_tags() {
+    let (_dir, path) = temp_db_path("hybrid_validation.db");
+    let exec = executor(path, RunMode::Readwrite, 500, 100).await;
+
+    let create = exec
+        .create_text_collection_with_dimension(CreateTextCollectionStorageInput {
+            collection: "docs".to_string(),
+            dimension: 2,
+        })
+        .await;
+    assert!(create.success, "{create:?}");
+
+    let bad_metadata_tags = exec
+        .upsert_generated_texts(UpsertGeneratedTextsInput {
+            collection: "docs".to_string(),
+            items: vec![GeneratedTextItemInput {
+                id: "doc-a".to_string(),
+                vector: vec![1.0, 0.0],
+                text: "text".to_string(),
+                metadata: Some(json!({"tags": ["ok", 7]})),
+            }],
+        })
+        .await;
+    assert!(!bad_metadata_tags.success, "{bad_metadata_tags:?}");
+    assert!(vector_error_message(&bad_metadata_tags).contains("metadata.tags"));
+
+    let bad_search_tag = exec
+        .search_generated_text_hybrid(SearchGeneratedHybridTextInput {
+            collection: "docs".to_string(),
+            vector: vec![1.0, 0.0],
+            top_k: 1,
+            filter: None,
+            fts_query: None,
+            tags: vec![" ".to_string()],
+        })
+        .await;
+    assert!(!bad_search_tag.success, "{bad_search_tag:?}");
+    assert!(vector_error_message(&bad_search_tag).contains("tags must not contain empty"));
+
+    let bad_fts_query = exec
+        .search_generated_text_hybrid(SearchGeneratedHybridTextInput {
+            collection: "docs".to_string(),
+            vector: vec![1.0, 0.0],
+            top_k: 1,
+            filter: None,
+            fts_query: Some(" ".to_string()),
+            tags: Vec::new(),
+        })
+        .await;
+    assert!(!bad_fts_query.success, "{bad_fts_query:?}");
+    assert!(vector_error_message(&bad_fts_query).contains("fts_query must not be empty"));
+}
+
+#[tokio::test]
 async fn search_generated_text_filters_metadata() {
     let (_dir, path) = temp_db_path("search_filter.db");
     let exec = executor(path, RunMode::Readwrite, 500, 100).await;
