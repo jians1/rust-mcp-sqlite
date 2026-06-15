@@ -1,4 +1,4 @@
-use axum::{Json, Router, routing::post};
+use axum::{Json, Router, http::StatusCode, routing::post};
 use reqwest::Client;
 use serde_json::{Value, json};
 use sqlite_mcp_rs::config::{DEFAULT_EMBEDDING_BATCH_SIZE, EmbeddingRuntimeConfig, RunMode};
@@ -10,6 +10,47 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 const TEST_EMBEDDINGS_ROUTE: &str = "/v1/embeddings";
+
+#[tokio::test]
+async fn mcp_endpoint_rejects_trailing_slash_and_subpaths() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("mcp_route.db");
+    let executor = SqliteExecutor::open(ExecutorConfig {
+        db_path,
+        mode: RunMode::Readwrite,
+        max_rows: 500,
+        max_top_k: 100,
+        timeout_ms: 10_000,
+    })
+    .unwrap();
+
+    let server = spawn_test_server(executor, None, None).await.unwrap();
+    let client = Client::new();
+
+    for path in [
+        format!("{}/", server.url()),
+        format!("{}/foo", server.url()),
+    ] {
+        let response = client
+            .post(path)
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0.1.0"}
+                }
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
 
 #[tokio::test]
 async fn mcp_lists_execute_sql_and_vector_tools() {

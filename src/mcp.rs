@@ -523,7 +523,7 @@ fn router_with_cancellation(
         );
 
     let app = Router::new()
-        .nest_service("/mcp", service)
+        .route_service("/mcp", service)
         .layer(from_fn_with_state(AuthState::new(auth_token), require_auth));
 
     Ok(app)
